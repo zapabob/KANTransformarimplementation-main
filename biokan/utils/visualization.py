@@ -319,4 +319,130 @@ def plot_layer_temporal_integration(model, ax=None):
     ax.set_xlabel("受信層")
     ax.set_ylabel("送信層")
     
-    return ax 
+    return ax
+
+
+"""
+実験結果の可視化ツール
+"""
+
+import json
+from pathlib import Path
+from typing import Dict, List, Optional
+import pandas as pd
+
+class ExperimentVisualizer:
+    """実験結果の可視化クラス"""
+    
+    def __init__(self, results_dir: str):
+        self.results_dir = Path(results_dir)
+        
+    def load_results(self, experiment_name: str) -> Dict:
+        """実験結果の読み込み"""
+        results_file = self.results_dir / experiment_name / "results.json"
+        with open(results_file, 'r') as f:
+            return json.load(f)
+            
+    def plot_training_history(self, experiment_name: str,
+                            metrics: Optional[List[str]] = None,
+                            save_path: Optional[str] = None):
+        """学習履歴のプロット"""
+        results = self.load_results(experiment_name)
+        history = results['history']
+        
+        if metrics is None:
+            metrics = list(history['metrics'].keys())
+            
+        plt.figure(figsize=(12, 6))
+        for metric in metrics:
+            if metric in history['metrics']:
+                plt.plot(history['metrics'][metric],
+                        label=f'{metric}')
+                
+        plt.title(f'Training History - {experiment_name}')
+        plt.xlabel('Epoch')
+        plt.ylabel('Metric Value')
+        plt.legend()
+        plt.grid(True)
+        
+        if save_path:
+            plt.savefig(save_path)
+        plt.close()
+        
+    def plot_confusion_matrix(self, experiment_name: str,
+                            true_labels: np.ndarray,
+                            pred_labels: np.ndarray,
+                            save_path: Optional[str] = None):
+        """混同行列のプロット"""
+        cm = pd.crosstab(true_labels, pred_labels,
+                        normalize='index')
+        
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(cm, annot=True, fmt='.2f', cmap='Blues')
+        plt.title(f'Confusion Matrix - {experiment_name}')
+        plt.xlabel('Predicted')
+        plt.ylabel('True')
+        
+        if save_path:
+            plt.savefig(save_path)
+        plt.close()
+        
+    def compare_experiments(self, experiment_names: List[str],
+                          metric: str = 'accuracy',
+                          save_path: Optional[str] = None):
+        """実験結果の比較"""
+        plt.figure(figsize=(12, 6))
+        
+        for exp_name in experiment_names:
+            results = self.load_results(exp_name)
+            if metric in results['history']['metrics']:
+                values = results['history']['metrics'][metric]
+                plt.plot(values, label=exp_name)
+                
+        plt.title(f'Experiment Comparison - {metric}')
+        plt.xlabel('Epoch')
+        plt.ylabel(metric)
+        plt.legend()
+        plt.grid(True)
+        
+        if save_path:
+            plt.savefig(save_path)
+        plt.close()
+        
+    def plot_parameter_importance(self, experiment_results: List[Dict],
+                                target_metric: str = 'best_metric',
+                                save_path: Optional[str] = None):
+        """ハイパーパラメータの重要度分析"""
+        # パラメータと結果の抽出
+        data = []
+        for result in experiment_results:
+            params = result['config']
+            metric_value = result[target_metric]
+            
+            # フラット化したパラメータ辞書を作成
+            flat_params = {}
+            for k, v in params.items():
+                if isinstance(v, dict):
+                    for sub_k, sub_v in v.items():
+                        flat_params[f"{k}_{sub_k}"] = sub_v
+                else:
+                    flat_params[k] = v
+                    
+            flat_params[target_metric] = metric_value
+            data.append(flat_params)
+            
+        # DataFrameの作成と相関分析
+        df = pd.DataFrame(data)
+        correlations = df.corr()[target_metric].sort_values(ascending=False)
+        
+        plt.figure(figsize=(10, 6))
+        correlations[1:11].plot(kind='bar')  # トップ10のパラメータ
+        plt.title('Parameter Importance Analysis')
+        plt.xlabel('Parameter')
+        plt.ylabel(f'Correlation with {target_metric}')
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path)
+        plt.close() 

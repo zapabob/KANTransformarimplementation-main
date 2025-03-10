@@ -1,5 +1,5 @@
 """
-神経伝達物質のダイナミクスと調節機構の実装
+神経伝達物質のダイナミクスを実装するモジュール
 """
 
 import torch
@@ -9,217 +9,135 @@ from typing import Dict, Optional, Tuple
 
 class DetailedNeurotransmitterSystem(nn.Module):
     """
-    詳細な神経伝達物質のダイナミクスを実装するクラス
+    詳細な神経伝達物質システムの実装
     """
     
     def __init__(self, hidden_dim: int):
         super().__init__()
         
-        # 神経伝達物質の初期パラメータ
-        self.neurotransmitters = {
-            'glutamate': {
-                'baseline': 1.0,
-                'release_rate': 0.8,
-                'reuptake_rate': 0.6,
-                'decay_rate': 0.2,
-                'synthesis_rate': 0.4,
-                'vesicle_pool': 1.0,
-                'current_level': 1.0
-            },
-            'gaba': {
-                'baseline': 1.0,
-                'release_rate': 0.7,
-                'reuptake_rate': 0.5,
-                'decay_rate': 0.15,
-                'synthesis_rate': 0.3,
-                'vesicle_pool': 1.0,
-                'current_level': 1.0
-            },
-            'dopamine': {
-                'baseline': 1.0,
-                'release_rate': 0.6,
-                'reuptake_rate': 0.7,
-                'decay_rate': 0.1,
-                'synthesis_rate': 0.2,
-                'vesicle_pool': 1.0,
-                'current_level': 1.0
-            },
-            'serotonin': {
-                'baseline': 1.0,
-                'release_rate': 0.5,
-                'reuptake_rate': 0.8,
-                'decay_rate': 0.05,
-                'synthesis_rate': 0.15,
-                'vesicle_pool': 1.0,
-                'current_level': 1.0
-            },
-            'noradrenaline': {
-                'baseline': 1.0,
-                'release_rate': 0.7,
-                'reuptake_rate': 0.6,
-                'decay_rate': 0.1,
-                'synthesis_rate': 0.25,
-                'vesicle_pool': 1.0,
-                'current_level': 1.0
-            },
-            'acetylcholine': {
-                'baseline': 1.0,
-                'release_rate': 0.6,
-                'reuptake_rate': 0.5,
-                'decay_rate': 0.15,
-                'synthesis_rate': 0.3,
-                'vesicle_pool': 1.0,
-                'current_level': 1.0
-            }
-        }
+        self.hidden_dim = hidden_dim
         
-        # シナプス前終末の状態を表現
-        self.presynaptic_state = nn.Parameter(torch.ones(hidden_dim))
+        # 神経伝達物質のパラメータ
+        self.baseline_levels = nn.Parameter(torch.ones(6))  # [Glu, GABA, DA, 5-HT, NE, ACh]
+        self.release_rates = nn.Parameter(torch.ones(6) * 0.1)
+        self.reuptake_rates = nn.Parameter(torch.ones(6) * 0.2)
+        self.decay_rates = nn.Parameter(torch.ones(6) * 0.1)
+        self.synthesis_rates = nn.Parameter(torch.ones(6) * 0.05)
         
-        # 受容体の感受性
-        self.receptor_sensitivity = nn.Parameter(torch.ones(len(self.neurotransmitters)))
+        # シナプス小胞プール
+        self.vesicle_pools = nn.Parameter(torch.ones(6) * 1.0)
+        
+        # 現在の神経伝達物質レベル
+        self.current_levels = nn.Parameter(torch.ones(6))
         
         # カルシウムダイナミクス
-        self.calcium_level = nn.Parameter(torch.ones(hidden_dim))
-        self.calcium_channels = nn.Parameter(torch.rand(hidden_dim) * 0.1)
+        self.calcium_level = nn.Parameter(torch.tensor(0.1))
+        self.calcium_decay = nn.Parameter(torch.tensor(0.1))
+        self.calcium_influx_rate = nn.Parameter(torch.tensor(0.2))
         
-        # 薬物効果の状態
-        self.active_drugs = {}
+        # 受容体感受性
+        self.receptor_sensitivity = nn.Parameter(torch.ones(6))
         
-    def update_neurotransmitter(self, nt_name: str, activity: float, delta_t: float = 0.1) -> None:
+    def update_neurotransmitter_states(self, activity: torch.Tensor) -> None:
         """
         神経伝達物質の状態を更新
         
         Args:
-            nt_name: 神経伝達物質の名前
-            activity: 神経活動レベル
-            delta_t: 時間ステップ
+            activity: 神経活動
         """
-        nt = self.neurotransmitters[nt_name]
-        
-        # シナプス小胞からの放出
-        release = activity * nt['release_rate'] * nt['vesicle_pool'] * delta_t
+        # 活動に基づく放出
+        release = torch.sigmoid(activity.mean()) * self.release_rates * self.vesicle_pools
         
         # 再取り込みと分解
-        reuptake = nt['current_level'] * nt['reuptake_rate'] * delta_t
-        decay = nt['current_level'] * nt['decay_rate'] * delta_t
+        reuptake = self.reuptake_rates * self.current_levels
+        decay = self.decay_rates * self.current_levels
         
         # 合成
-        synthesis = (nt['baseline'] - nt['vesicle_pool']) * nt['synthesis_rate'] * delta_t
+        synthesis = self.synthesis_rates * (1.0 - self.vesicle_pools)
         
         # 状態の更新
-        nt['current_level'] += release - reuptake - decay
-        nt['vesicle_pool'] += synthesis - release
+        self.current_levels.data = torch.clamp(
+            self.current_levels + release - reuptake - decay,
+            0.0, 2.0
+        )
         
-        # 値の範囲を制限
-        nt['current_level'] = max(0.0, min(2.0, nt['current_level']))
-        nt['vesicle_pool'] = max(0.0, min(2.0, nt['vesicle_pool']))
+        self.vesicle_pools.data = torch.clamp(
+            self.vesicle_pools - release + synthesis,
+            0.0, 2.0
+        )
         
-    def apply_drug_effect(self, drug_name: str, dose: float, duration: float) -> None:
+    def apply_drug_effects(self, drug_type: str) -> None:
         """
-        薬物効果を適用
+        薬物効果の適用
         
         Args:
-            drug_name: 薬物の名前
-            dose: 投与量
-            duration: 効果持続時間
+            drug_type: 薬物の種類
         """
-        drug_effects = {
-            'ssri': {
-                'serotonin': {'reuptake_rate': -0.5},
-            },
-            'methylphenidate': {
-                'dopamine': {'reuptake_rate': -0.4},
-                'noradrenaline': {'reuptake_rate': -0.3}
-            },
-            'ketamine': {
-                'glutamate': {'release_rate': -0.3},
-                'dopamine': {'release_rate': 0.2}
-            },
-            'psilocybin': {
-                'serotonin': {'receptor_sensitivity': 0.4},
-                'glutamate': {'release_rate': 0.2}
-            }
-        }
-        
-        if drug_name in drug_effects:
-            self.active_drugs[drug_name] = {
-                'effects': drug_effects[drug_name],
-                'dose': dose,
-                'duration': duration,
-                'elapsed_time': 0.0
-            }
+        if drug_type == "ssri":
+            # セロトニン再取り込み阻害
+            self.reuptake_rates.data[3] *= 0.3
+        elif drug_type == "methylphenidate":
+            # ドーパミン・ノルアドレナリン再取り込み阻害
+            self.reuptake_rates.data[2:4] *= 0.4
+        elif drug_type == "ketamine":
+            # NMDA受容体阻害とグルタミン酸調節
+            self.receptor_sensitivity.data[0] *= 0.7
+        elif drug_type == "psilocybin":
+            # セロトニン受容体作動
+            self.receptor_sensitivity.data[3] *= 1.5
             
-    def update_calcium_dynamics(self, activity: torch.Tensor, delta_t: float = 0.1) -> None:
+    def update_calcium(self, activity: torch.Tensor) -> None:
         """
         カルシウムダイナミクスの更新
         
         Args:
             activity: 神経活動
-            delta_t: 時間ステップ
         """
-        # カルシウムチャネルの活性化
-        channel_activation = torch.sigmoid(activity)
+        calcium_influx = self.calcium_influx_rate * torch.sigmoid(activity.mean())
+        calcium_decay = self.calcium_decay * self.calcium_level
         
-        # カルシウム流入
-        calcium_influx = channel_activation * self.calcium_channels
+        self.calcium_level.data = torch.clamp(
+            self.calcium_level + calcium_influx - calcium_decay,
+            0.0, 2.0
+        )
         
-        # カルシウム排出（指数減衰）
-        calcium_efflux = self.calcium_level * 0.1
-        
-        # カルシウムレベルの更新
-        self.calcium_level.data += (calcium_influx - calcium_efflux) * delta_t
-        
-        # 値の範囲を制限
-        self.calcium_level.data = torch.clamp(self.calcium_level, 0.0, 2.0)
-        
-    def forward(self, activity: torch.Tensor, delta_t: float = 0.1) -> Dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """
-        神経伝達物質システムの順伝播
+        順伝播
         
         Args:
-            activity: 神経活動
-            delta_t: 時間ステップ
+            x: 入力テンソル
             
         Returns:
-            modulation: 調節効果の辞書
+            modulation: 調節効果
+            info: 神経伝達物質の状態情報
         """
-        # カルシウムダイナミクスの更新
-        self.update_calcium_dynamics(activity, delta_t)
-        
-        # 各神経伝達物質の更新
-        for nt_name in self.neurotransmitters:
-            self.update_neurotransmitter(nt_name, activity.mean().item(), delta_t)
-            
-        # 薬物効果の適用
-        for drug_name, drug_info in self.active_drugs.items():
-            drug_info['elapsed_time'] += delta_t
-            if drug_info['elapsed_time'] > drug_info['duration']:
-                del self.active_drugs[drug_name]
-                continue
-                
-            for nt_name, effects in drug_info['effects'].items():
-                for param, change in effects.items():
-                    if param in self.neurotransmitters[nt_name]:
-                        self.neurotransmitters[nt_name][param] += change * drug_info['dose']
+        # 神経伝達物質の状態を更新
+        self.update_neurotransmitter_states(x)
+        self.update_calcium(x)
         
         # 調節効果の計算
-        modulation = {
-            'excitation': torch.sigmoid(
-                self.neurotransmitters['glutamate']['current_level'] * self.receptor_sensitivity[0] +
-                self.neurotransmitters['noradrenaline']['current_level'] * self.receptor_sensitivity[4]
-            ),
-            'inhibition': torch.sigmoid(
-                self.neurotransmitters['gaba']['current_level'] * self.receptor_sensitivity[1]
-            ),
-            'plasticity': torch.sigmoid(
-                self.neurotransmitters['dopamine']['current_level'] * self.receptor_sensitivity[2] +
-                self.neurotransmitters['serotonin']['current_level'] * self.receptor_sensitivity[3]
-            ),
-            'attention': torch.sigmoid(
-                self.neurotransmitters['acetylcholine']['current_level'] * self.receptor_sensitivity[5]
-            ),
-            'calcium': self.calcium_level
+        modulation = torch.zeros_like(x)
+        
+        # グルタミン酸による興奮性調節
+        modulation += self.current_levels[0] * self.receptor_sensitivity[0] * x
+        
+        # GABAによる抑制性調節
+        modulation -= self.current_levels[1] * self.receptor_sensitivity[1] * x
+        
+        # モノアミンによる調節
+        for i in range(2, 6):
+            modulation *= (1.0 + 0.1 * self.current_levels[i] * self.receptor_sensitivity[i])
+            
+        # カルシウムの影響
+        modulation *= (1.0 + 0.2 * self.calcium_level)
+        
+        # 情報の収集
+        info = {
+            'neurotransmitter_levels': self.current_levels.detach(),
+            'vesicle_pools': self.vesicle_pools.detach(),
+            'calcium_level': self.calcium_level.detach(),
+            'receptor_sensitivity': self.receptor_sensitivity.detach()
         }
         
-        return modulation 
+        return modulation, info 

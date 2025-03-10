@@ -1082,7 +1082,7 @@ class NeuropharmacologicalBioKAN(nn.Module):
         # 活動量に基づく刺激を計算
         average_activation = h.abs().mean().item()
         max_activation = h.abs().max().item()
-            
+        
         # 神経伝達物質への刺激
         stimuli = {
             'glutamate': average_activation * 0.8,

@@ -1,5 +1,0 @@
-﻿    train_dataset, val_dataset = random_split(
-        train_dataset, [train_size, val_size], 
-        generator=torch.Generator().manual_seed(42)
-    
-    # 繝・・繧ｿ繝ｭ繝ｼ繝繝ｼ縺ｮ菴懈・
