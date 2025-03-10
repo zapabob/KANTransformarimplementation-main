@@ -6,6 +6,7 @@
 """
 
 import torch
+import torch.nn as nn
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Union
 from collections import deque
@@ -352,7 +353,7 @@ class Glutamate(Neurotransmitter):
         return base_ltp * (1.0 + 0.7 * self.level * self.effectiveness)
 
 
-class NeuromodulatorSystem:
+class NeuromodulatorSystem(nn.Module):
     """神経伝達物質システム
     
     複数の神経伝達物質を組み合わせて管理し、
@@ -360,76 +361,33 @@ class NeuromodulatorSystem:
     """
     
     def __init__(self):
-        """神経伝達物質システムを初期化"""
-        self.modulators = {
-            "dopamine": Dopamine(),
-            "serotonin": Serotonin(),
-            "noradrenaline": Noradrenaline(),
-            "acetylcholine": Acetylcholine(),
-            "GABA": GABA(),
-            "glutamate": Glutamate()
-        }
+        super().__init__()
+        self.register_buffer('dopamine', torch.zeros(1))
+        self.register_buffer('serotonin', torch.zeros(1))
+        self.register_buffer('noradrenaline', torch.zeros(1))
+        self.register_buffer('acetylcholine', torch.zeros(1))
         
-        # 活性化履歴
-        self.history = {name: [] for name in self.modulators.keys()}
-        
-        # 最大記録長
-        self.max_history_length = 1000
-    
-    def update(self, 
-               dopamine: float = 0.0,
-               serotonin: float = 0.0, 
-               noradrenaline: float = 0.0,
-               acetylcholine: float = 0.0,
-               GABA: float = 0.0,
-               glutamate: float = 0.0) -> Dict[str, float]:
-        """
-        全ての神経伝達物質レベルを更新
-        
-        Args:
-            各神経伝達物質の変化量
-        
-        Returns:
-            更新後の各神経伝達物質レベル
-        """
-        updates = {
-            "dopamine": dopamine,
-            "serotonin": serotonin,
-            "noradrenaline": noradrenaline,
-            "acetylcholine": acetylcholine,
-            "GABA": GABA,
-            "glutamate": glutamate
-        }
-        
-        current_levels = {}
-        
-        for name, delta in updates.items():
-            level = self.modulators[name].update(delta)
-            current_levels[name] = level
+    def update(self, stimuli: Optional[Dict[str, torch.Tensor]] = None, delta_t: float = 1.0):
+        if stimuli is None:
+            stimuli = {}
             
-            # 履歴に追加
-            self.history[name].append(level)
-            
-            # 履歴が長すぎる場合は古いものを削除
-            if len(self.history[name]) > self.max_history_length:
-                self.history[name] = self.history[name][-self.max_history_length:]
+        # 各神経伝達物質の更新
+        self.dopamine = self._update_level(self.dopamine, stimuli.get('dopamine', 0.0), delta_t)
+        self.serotonin = self._update_level(self.serotonin, stimuli.get('serotonin', 0.0), delta_t)
+        self.noradrenaline = self._update_level(self.noradrenaline, stimuli.get('noradrenaline', 0.0), delta_t)
+        self.acetylcholine = self._update_level(self.acetylcholine, stimuli.get('acetylcholine', 0.0), delta_t)
         
-        return current_levels
-    
-    def get_modulator(self, name: str) -> Neurotransmitter:
-        """
-        指定された神経伝達物質を取得
+    def _update_level(self, current: torch.Tensor, stimulus: float, delta_t: float) -> torch.Tensor:
+        decay = 0.1 * delta_t
+        return current * (1 - decay) + torch.tensor(stimulus).to(current.device) * delta_t
         
-        Args:
-            name: 神経伝達物質の名前
-        
-        Returns:
-            神経伝達物質オブジェクト
-        """
-        if name not in self.modulators:
-            raise ValueError(f"Unknown neurotransmitter: {name}")
-        
-        return self.modulators[name]
+    def get_state(self) -> Dict[str, torch.Tensor]:
+        return {
+            'dopamine': self.dopamine,
+            'serotonin': self.serotonin,
+            'noradrenaline': self.noradrenaline,
+            'acetylcholine': self.acetylcholine
+        }
     
     def apply_drug_effect(self, drug_type: str, dose: float = 1.0) -> None:
         """
@@ -444,83 +402,61 @@ class NeuromodulatorSystem:
         
         if drug_type == "SSRI":
             # 選択的セロトニン再取り込み阻害薬
-            self.modulators["serotonin"].update(0.5 * dose)
+            self.serotonin = self._update_level(self.serotonin, 0.5 * dose, 1.0)
             
         elif drug_type == "SNRI":
             # セロトニン・ノルアドレナリン再取り込み阻害薬
-            self.modulators["serotonin"].update(0.4 * dose)
-            self.modulators["noradrenaline"].update(0.4 * dose)
+            self.serotonin = self._update_level(self.serotonin, 0.4 * dose, 1.0)
+            self.noradrenaline = self._update_level(self.noradrenaline, 0.4 * dose, 1.0)
             
         elif drug_type == "TCA":
             # 三環系抗うつ薬
-            self.modulators["serotonin"].update(0.3 * dose)
-            self.modulators["noradrenaline"].update(0.3 * dose)
-            self.modulators["acetylcholine"].update(-0.3 * dose)  # 抗コリン作用
+            self.serotonin = self._update_level(self.serotonin, 0.3 * dose, 1.0)
+            self.noradrenaline = self._update_level(self.noradrenaline, 0.3 * dose, 1.0)
+            self.acetylcholine = self._update_level(self.acetylcholine, -0.3 * dose, 1.0)  # 抗コリン作用
             
         elif drug_type == "typical_antipsychotic":
             # 定型抗精神病薬
-            self.modulators["dopamine"].update(-0.7 * dose)
+            self.dopamine = self._update_level(self.dopamine, -0.7 * dose, 1.0)
             
         elif drug_type == "atypical_antipsychotic":
             # 非定型抗精神病薬
-            self.modulators["dopamine"].update(-0.5 * dose)
-            self.modulators["serotonin"].update(-0.4 * dose)
+            self.dopamine = self._update_level(self.dopamine, -0.5 * dose, 1.0)
+            self.serotonin = self._update_level(self.serotonin, -0.4 * dose, 1.0)
             
         elif drug_type == "benzodiazepine":
             # ベンゾジアゼピン系抗不安薬
             # GABAの効果を増強（レベル自体ではなく有効性を高める）
-            self.modulators["GABA"].effectiveness += 0.6 * dose
+            self.GABA.effectiveness += 0.6 * dose
             
         elif drug_type == "amphetamine":
             # アンフェタミン系刺激薬
-            self.modulators["dopamine"].update(0.7 * dose)
-            self.modulators["noradrenaline"].update(0.5 * dose)
+            self.dopamine = self._update_level(self.dopamine, 0.7 * dose, 1.0)
+            self.noradrenaline = self._update_level(self.noradrenaline, 0.5 * dose, 1.0)
             
         elif drug_type == "methylphenidate":
             # メチルフェニデート（リタリンなど）
-            self.modulators["dopamine"].update(0.5 * dose)
-            self.modulators["noradrenaline"].update(0.4 * dose)
+            self.dopamine = self._update_level(self.dopamine, 0.5 * dose, 1.0)
+            self.noradrenaline = self._update_level(self.noradrenaline, 0.4 * dose, 1.0)
             
         elif drug_type == "caffeine":
             # カフェイン
-            self.modulators["noradrenaline"].update(0.3 * dose)
-            self.modulators["acetylcholine"].update(0.2 * dose)
+            self.noradrenaline = self._update_level(self.noradrenaline, 0.3 * dose, 1.0)
+            self.acetylcholine = self._update_level(self.acetylcholine, 0.2 * dose, 1.0)
             
         else:
             raise ValueError(f"Unknown drug type: {drug_type}")
     
-    def get_current_state(self) -> Dict[str, float]:
-        """
-        全ての神経伝達物質の現在のレベルを取得
-        
-        Returns:
-            各神経伝達物質の現在のレベル
-        """
-        return {name: mod.level for name, mod in self.modulators.items()}
-    
-    def get_normalized_state(self) -> Dict[str, float]:
-        """
-        正規化された神経伝達物質レベルを取得
-        
-        Returns:
-            各神経伝達物質の正規化レベル（0〜1）
-        """
-        return {name: mod.get_normalized_level() for name, mod in self.modulators.items()}
-    
     def reset(self) -> None:
         """全ての神経伝達物質を初期状態にリセット"""
-        for mod in self.modulators.values():
-            mod.level = mod.baseline
-            mod.effectiveness = 1.0
-        
-        # 履歴もクリア
-        self.history = {name: [] for name in self.modulators.keys()}
+        self.dopamine = torch.zeros(1)
+        self.serotonin = torch.zeros(1)
+        self.noradrenaline = torch.zeros(1)
+        self.acetylcholine = torch.zeros(1)
+        self.GABA.effectiveness = 1.0
     
     def __repr__(self) -> str:
-        lines = ["NeuromodulatorSystem:"]
-        for name, mod in self.modulators.items():
-            lines.append(f"  {mod}")
-        return "\n".join(lines)
+        return f"NeuromodulatorSystem: dopamine={self.dopamine[0]:.2f}, serotonin={self.serotonin[0]:.2f}, noradrenaline={self.noradrenaline[0]:.2f}, acetylcholine={self.acetylcholine[0]:.2f}"
 
 
 class PharmacologicalModulator:

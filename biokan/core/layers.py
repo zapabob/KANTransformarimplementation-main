@@ -11,23 +11,19 @@ import math
 from typing import Dict, List, Optional, Tuple, Any, Union
 
 
-class TernaryActivationFunction(Function):
+class TernaryActivationFunction(nn.Module):
     """
     3価活性化関数 (-1, 0, 1)
     神経系の興奮・抑制・無活性状態を模倣
     """
-    @staticmethod
-    def forward(ctx, input: torch.Tensor, threshold: float) -> torch.Tensor:
-        ctx.save_for_backward(input, torch.tensor(threshold))
-        return torch.where(input > threshold, torch.ones_like(input),
-                         torch.where(input < -threshold, -torch.ones_like(input),
-                                   torch.zeros_like(input)))
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> Tuple[torch.Tensor, None]:
-        input, threshold = ctx.saved_tensors
-        grad_input = grad_output.clone() * (input.abs() < threshold).float()
-        return grad_input, None
+    def __init__(self, threshold=0.5):
+        super().__init__()
+        self.threshold = threshold
+        
+    def forward(self, x):
+        return torch.where(x > self.threshold, torch.ones_like(x),
+                         torch.where(x < -self.threshold, -torch.ones_like(x),
+                                   torch.zeros_like(x)))
 
 
 class MultiHeadAttention(nn.Module):
@@ -35,60 +31,68 @@ class MultiHeadAttention(nn.Module):
     標準的なマルチヘッドアテンション層
     BioKANの基盤となるアテンション機構
     """
-    def __init__(self, dim, num_heads, dropout=0.1):
+    def __init__(self, embed_dim, num_heads, dropout=0.0):
         super().__init__()
+        self.embed_dim = embed_dim
         self.num_heads = num_heads
-        self.head_dim = dim // num_heads
-        self.scale = self.head_dim ** -0.5
+        self.dropout = dropout
+        self.head_dim = embed_dim // num_heads
+        assert self.head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
         
-        self.qkv = nn.Linear(dim, dim * 3)
-        self.proj = nn.Linear(dim, dim)
-        self.dropout = nn.Dropout(dropout)
+        self.q_proj = nn.Linear(embed_dim, embed_dim)
+        self.k_proj = nn.Linear(embed_dim, embed_dim)
+        self.v_proj = nn.Linear(embed_dim, embed_dim)
+        self.out_proj = nn.Linear(embed_dim, embed_dim)
         
-    def forward(self, x):
-        batch_size, seq_len, dim = x.shape
+        self.dropout_layer = nn.Dropout(dropout)
         
-        # QKV投影を計算
-        qkv = self.qkv(x).reshape(batch_size, seq_len, 3, self.num_heads, self.head_dim)
-        qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, H, S, D)
-        q, k, v = qkv[0], qkv[1], qkv[2]
+    def forward(self, query, key=None, value=None, attn_mask=None, need_weights=False):
+        if key is None:
+            key = query
+        if value is None:
+            value = key
+            
+        batch_size = query.size(0)
         
-        # アテンションスコアの計算
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = F.softmax(attn, dim=-1)
-        attn = self.dropout(attn)
+        # 線形変換とヘッドの分割
+        q = self.q_proj(query).view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(key).view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(value).view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
         
-        # アテンション適用
-        out = (attn @ v).transpose(1, 2).reshape(batch_size, seq_len, dim)
-        out = self.proj(out)
+        # スケーリングされたドット積アテンション
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         
-        return out
+        if attn_mask is not None:
+            scores = scores.masked_fill(attn_mask == 0, float('-inf'))
+        
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout_layer(attn_weights)
+        
+        # 値との積と結合
+        attn_output = torch.matmul(attn_weights, v)
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, -1, self.embed_dim)
+        
+        output = self.out_proj(attn_output)
+        
+        if need_weights:
+            return output, attn_weights
+        return output, None
 
 
-class KANLinear(nn.Module):
+class KANLinear(nn.Linear):
     """
     KANモデルの線形層
     入力を3値化して処理する線形変換
     """
-    def __init__(self, in_features, out_features, bias=True, threshold=0.5):
-        super().__init__()
-        self.weight = nn.Parameter(torch.empty(out_features, in_features))
-        if bias:
-            self.bias = nn.Parameter(torch.empty(out_features))
-        else:
-            self.register_parameter('bias', None)
-        self.threshold = threshold
-        self.reset_parameters()
-        
-    def reset_parameters(self):
-        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
-        if self.bias is not None:
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
-            bound = 1 / math.sqrt(fan_in)
-            nn.init.uniform_(self.bias, -bound, bound)
+    def __init__(self, in_features, out_features, bias=True, neuromodulation=True):
+        super().__init__(in_features, out_features, bias)
+        self.neuromodulation = neuromodulation
+        if neuromodulation:
+            self.neuromod_scale = nn.Parameter(torch.ones(out_features))
+            self.neuromod_bias = nn.Parameter(torch.zeros(out_features))
             
-    def forward(self, x):
-        # 3値活性化関数を適用
-        ternary_x = TernaryActivationFunction.apply(x, self.threshold)
-        output = F.linear(ternary_x, self.weight, self.bias)
+    def forward(self, x, neuromod=None):
+        output = super().forward(x)
+        if self.neuromodulation and neuromod is not None:
+            output = output * self.neuromod_scale + self.neuromod_bias
         return output 

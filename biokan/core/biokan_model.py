@@ -160,10 +160,10 @@ class BioKANBlock(nn.Module):
         current_dim = in_features
         
         for i in range(n_layers - 1):
-            layers.append(KANLinear(current_dim, hidden_dim, use_bias=use_bias))
+            layers.append(KANLinear(current_dim, hidden_dim, bias=use_bias, neuromodulation=neuromodulation))
             current_dim = hidden_dim
         
-        layers.append(KANLinear(current_dim, out_features, use_bias=use_bias))
+        layers.append(KANLinear(current_dim, out_features, bias=use_bias, neuromodulation=neuromodulation))
         
         self.layers = nn.ModuleList(layers)
         
@@ -399,19 +399,14 @@ class HierarchicalMultiScaleAttention(nn.Module):
         return output
 
 
-class EnhancedAstrocyte:
-    """
-    拡張アストロサイト実装
-    Cornell-Bell et al. (1990)とVerkhratsky & Nedergaard (2018)の研究に基づく
-    """
+class EnhancedAstrocyte(nn.Module):
+    """拡張アストロサイトモジュール"""
     
     def __init__(self, region_shape: Tuple[int, ...], activation_threshold: float = 0.7, 
                  decay_rate: float = 0.05, diffusion_rate: float = 0.1,
                  temporal_integration_capacity: float = 0.8,
                  layer_coupling_strength: float = 0.6):
-        """
-        初期化
-        """
+        super().__init__()
         self.region_shape = region_shape
         self.activation_threshold = activation_threshold
         self.decay_rate = decay_rate
@@ -419,169 +414,41 @@ class EnhancedAstrocyte:
         self.temporal_integration_capacity = temporal_integration_capacity
         self.layer_coupling_strength = layer_coupling_strength
         
-        # 基本状態変数
-        self.activation = np.zeros(region_shape)  # Ca2+活性化状態
-        self.glutamate_level = np.zeros(region_shape)
-        self.gaba_level = np.zeros(region_shape)
-        self.trophic_factors = np.zeros(region_shape)  # BDNF、GDNFなど
+        # 状態の初期化
+        self.register_buffer('activation', torch.zeros(region_shape))
+        self.register_buffer('calcium_level', torch.zeros(region_shape))
+        self.register_buffer('gliotransmitter_state', torch.zeros(region_shape))
         
-        # 時間差処理のための変数
-        self.temporal_delay_buffer = []
-        self.buffer_max_size = 5
-        self.layer_specific_delays = np.linspace(0.1, 1.0, 6)  # 皮質6層の特有の時間遅延
-        self.cross_layer_modulation = np.zeros(region_shape)
+    def forward(self, neural_activity: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """順伝播処理"""
+        self.update(neural_activity)
+        return self.get_modulatory_effect()
         
-        # 新規：グリオトランスミッター放出状態（Araque et al., 2014）
-        self.gliotransmitters = {
-            'glutamate': np.zeros(region_shape),  # 興奮性
-            'ATP': np.zeros(region_shape),       # プリン作動性
-            'D-serine': np.zeros(region_shape),  # NMDA補助因子
-            'TNF-alpha': np.zeros(region_shape)  # 免疫調節
-        }
+    def update(self, neural_activity: torch.Tensor, layer_index: int = 0, delta_t: float = 1.0,
+               drug_effects: Optional[Dict[str, float]] = None) -> None:
+        """状態の更新"""
+        # 活性化の更新
+        self.activation = torch.where(neural_activity > self.activation_threshold,
+                                    neural_activity,
+                                    self.activation * (1 - self.decay_rate))
         
-        # 新規：カルシウム波動力学パラメータ（Cornell-Bell et al., 1990）
-        self.calcium_wave_velocity = 15.0  # μm/s
-        self.calcium_oscillation_frequency = 0.1  # Hz
-        self.ip3_sensitivity = 0.75  # IP3受容体感受性
-        
-        # 新規：細胞外K+緩衝能（Verkhratsky & Nedergaard, 2018）
-        self.k_buffering_capacity = 0.8
-    
-    def update(self, neural_activity: np.ndarray, layer_index: int = 0, delta_t: float = 1.0,
-               drug_effects: Optional[Dict[str, float]] = None):
-        """
-        アストロサイトの状態を更新（薬物効果を含む）
-        """
-        # 神経活動に基づく活性化
-        activation_input = np.where(neural_activity > self.activation_threshold, 
-                                   neural_activity, 0)
-        self.activation += activation_input * delta_t
-        
-        # カルシウムウェーブの拡散
+        # カルシウム波の伝播
         self._propagate_calcium_wave(delta_t)
         
-        # 神経伝達物質レベルの更新
-        self.glutamate_level = np.maximum(0, neural_activity * 0.8 - self.activation * 0.4)
-        self.gaba_level = np.maximum(0, -neural_activity * 0.6 + self.activation * 0.3)
-        
-        # 栄養因子の更新
-        self.trophic_factors = self.activation * 0.5 * np.maximum(0, 1 - np.abs(neural_activity))
-        
-        # グリオトランスミッター放出の更新（Araque et al., 2014）
+        # グリア伝達物質の更新
         self._update_gliotransmitters()
         
-        # 皮質層間時間差処理
-        self._process_temporal_cortical_layers(neural_activity, layer_index, delta_t)
-        
-        # 薬物効果の適用（あれば）
+        # 薬物効果の適用
         if drug_effects:
             self._apply_drug_effects(drug_effects)
-    
-    def _propagate_calcium_wave(self, delta_t: float):
-        """
-        カルシウム波の伝播をシミュレート（Cornell-Bell et al., 1990）
-        """
-        # 畳み込みフィルタを使った拡散
-        kernel = np.array([[0.05, 0.1, 0.05], 
-                          [0.1, 0.4, 0.1], 
-                          [0.05, 0.1, 0.05]])
-        
-        padded = np.pad(self.activation, 1, mode='constant')
-        diffused = np.zeros_like(self.activation)
-        
-        # 2D拡散
-        if len(self.region_shape) == 2:
-            for i in range(self.region_shape[0]):
-                for j in range(self.region_shape[1]):
-                    diffused[i, j] = np.sum(padded[i:i+3, j:j+3] * kernel)
-        
-        # 拡散と減衰の適用
-        wave_distance = self.calcium_wave_velocity * delta_t
-        diffusion_scale = min(1.0, wave_distance / np.max(self.region_shape))
-        
-        self.activation = (1 - self.diffusion_rate * diffusion_scale) * self.activation + \
-                          self.diffusion_rate * diffusion_scale * diffused
-        self.activation *= (1 - self.decay_rate * delta_t)
-        
-        # IP3依存性カルシウム振動の追加（Volterra & Meldolesi, 2005）
-        oscillation = 0.2 * np.sin(2 * np.pi * self.calcium_oscillation_frequency * delta_t)
-        self.activation += oscillation * (self.activation > 0.2) * self.ip3_sensitivity
-    
-    def _update_gliotransmitters(self):
-        """
-        カルシウム濃度に基づくグリオトランスミッター放出の更新（Araque et al., 2014）
-        """
-        # グルタミン酸放出（高Ca2+での放出）
-        self.gliotransmitters['glutamate'] = np.where(
-            self.activation > 0.7,
-            self.activation * 0.6,
-            0
-        )
-        
-        # ATP放出（中程度Ca2+での放出）
-        self.gliotransmitters['ATP'] = np.where(
-            (self.activation > 0.4) & (self.activation < 0.8),
-            self.activation * 0.5,
-            0
-        )
-        
-        # D-serine放出（持続的なCa2+上昇に依存）
-        self.gliotransmitters['D-serine'] = np.where(
-            self.activation > 0.6,
-            self.activation * 0.7,
-            0
-        )
-        
-        # TNF-alpha放出（長期的な活性化）
-        # 実装省略（長期的なダイナミクスに依存）
-    
-    def _apply_drug_effects(self, drug_effects: Dict[str, float]):
-        """
-        薬物効果をアストロサイト機能に適用
-        """
-        # 抗精神病薬効果（Khoruzhenko et al., 2019）
-        if 'antipsychotic' in drug_effects:
-            dose = drug_effects['antipsychotic']
-            # D2受容体阻害効果によるCa2+シグナリング変化
-            self.activation *= (1.0 - 0.3 * dose)
-            self.ip3_sensitivity *= (1.0 - 0.2 * dose)
-        
-        # 抗うつ薬効果（Duman & Monteggia, 2006）
-        if 'antidepressant' in drug_effects:
-            dose = drug_effects['antidepressant']
-            duration = drug_effects.get('treatment_duration', 1)
             
-            # 慢性効果（BDNF増加）
-            chronic_factor = min(1.0, duration / 14.0)
-            self.trophic_factors += 0.3 * dose * chronic_factor
-            
-            # セロトニンによる間接効果
-            if drug_effects.get('serotonergic', False):
-                # 5-HT2A受容体を介したCa2+放出
-                self.activation += 0.2 * dose * (np.random.rand(*self.region_shape) < 0.3)
-        
-        # 認知増強薬効果
-        if 'cognitive_enhancer' in drug_effects:
-            dose = drug_effects['cognitive_enhancer']
-            # アセチルコリン作用増強
-            if drug_effects.get('cholinergic', False):
-                self.temporal_integration_capacity *= (1.0 + 0.2 * dose)
-                self.glutamate_level *= (1.0 - 0.2 * dose)  # グルタミン酸取り込み増加
-    
-    def get_modulatory_effect(self) -> Dict[str, np.ndarray]:
-        """
-        アストロサイトの調節効果を取得
-        """
+    def get_modulatory_effect(self) -> Dict[str, torch.Tensor]:
+        """調節効果の取得"""
         return {
-            'glutamate_uptake': 1.0 - 0.8 * self.glutamate_level,
-            'gaba_uptake': 1.0 - 0.7 * self.gaba_level,
-            'synapse_modulation': 0.8 + 0.4 * self.activation,
-            'trophic_support': self.trophic_factors,
-            'cross_layer_temporal_modulation': self.cross_layer_modulation,
-            # 新規：グリオトランスミッター効果
-            'glutamate_gliotransmission': self.gliotransmitters['glutamate'],
-            'ATP_signaling': self.gliotransmitters['ATP'],
-            'NMDA_coactivation': self.gliotransmitters['D-serine']
+            "excitation": self.activation * 1.2,
+            "inhibition": 1.0 - self.activation * 0.8,
+            "calcium_wave": self.calcium_level,
+            "gliotransmitter": self.gliotransmitter_state
         }
 
 
@@ -1869,117 +1736,52 @@ class NeuroTransformerBioKAN(nn.Module):
                  use_neuroplasticity=True,
                  use_glia=True):
         super().__init__()
-        
         self.in_features = in_features
         self.hidden_dim = hidden_dim
+        self.num_classes = num_classes
+        self.num_blocks = num_blocks
         self.num_heads = num_heads
         self.num_layers = num_layers
         self.max_seq_length = max_seq_length
+        self.use_neuroplasticity = use_neuroplasticity
+        self.use_glia = use_glia
         
-        # 位置エンコーディング（Transformerの強み）
-        self.positional_encoding = self._create_sinusoidal_encoding(max_seq_length, hidden_dim)
+        # 入力の埋め込み層
+        self.embedding = nn.Linear(in_features, hidden_dim)
+        self.dropout = nn.Dropout(dropout)
         
-        # 入力埋め込み層
-        self.embedding = nn.Sequential(
-            nn.Linear(in_features, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.Dropout(dropout)
-        )
+        # 位置エンコーディング
+        self.pos_encoding = self._create_sinusoidal_encoding(max_seq_length, hidden_dim)
         
-        # 拡張神経伝達物質システム
-        self.neuromodulator = AdvancedNeuromodulatorSystem()
+        # アテンション層
+        self.attention_layers = nn.ModuleList([
+            self._create_layer(hidden_dim, num_heads, dropout, i)
+            for i in range(num_layers)
+        ])
+        
+        # 層正規化
+        self.norm_layers = nn.ModuleList([
+            nn.LayerNorm(hidden_dim)
+            for _ in range(num_layers)
+        ])
+        
+        # 神経修飾システム
+        self.use_neuromodulation = True
+        self.neuromodulator = NeuromodulatorSystem()
+        
+        # グリア細胞
+        if use_glia:
+            self.astrocytes = nn.ModuleList([
+                EnhancedAstrocyte((hidden_dim,))
+                for _ in range(num_layers)
+            ])
         
         # 神経可塑性モジュール
-        self.neuroplasticity = NeuroplasticityModule(hidden_dim) if use_neuroplasticity else None
+        if use_neuroplasticity:
+            self.neuroplasticity = NeuroplasticityModule(hidden_dim)
         
-        # 階層的アテンション機構（皮質層ごとに特化）
-        self.attention_layers = nn.ModuleList()
-        
-        # 神経科学的レイヤー名と対応
-        self.layer_mapping = {
-            0: "layer1",     # 外側皮質層（感覚入力）
-            1: "layer2_3",   # 浅層（局所処理）
-            2: "layer4",     # 中間層（情報統合）
-            3: "layer5",     # 深層（長距離出力）
-            4: "layer6",     # 最深層（フィードバック）
-            5: "thalamic"    # 視床様レイヤー（調節）
-        }
-        
-        # 各皮質層に特化したアテンション構築
-        for i in range(num_layers):
-            layer_type = self.layer_mapping.get(i, f"layer{i}")
-            
-            if layer_type == "layer1":
-                # 感覚入力層：高解像度・局所的コンテキスト
-                self.attention_layers.append(self._create_layer(
-                    hidden_dim, num_heads * 2, dropout, 
-                    receptive_field="local", 
-                    layer_name=layer_type
-                ))
-            elif layer_type == "layer2_3":
-                # 浅層：水平方向結合による特徴統合
-                self.attention_layers.append(self._create_layer(
-                    hidden_dim, num_heads, dropout, 
-                    receptive_field="horizontal", 
-                    layer_name=layer_type
-                ))
-            elif layer_type == "layer4":
-                # 中間層：入力統合・中距離コンテキスト
-                self.attention_layers.append(self._create_layer(
-                    hidden_dim, num_heads, dropout, 
-                    receptive_field="medium", 
-                    layer_name=layer_type
-                ))
-            elif layer_type == "layer5":
-                # 深層：広域コンテキスト・長距離依存性
-                self.attention_layers.append(self._create_layer(
-                    hidden_dim, num_heads // 2, dropout, 
-                    receptive_field="global", 
-                    layer_name=layer_type
-                ))
-            elif layer_type == "layer6":
-                # 最深層：フィードバック・トップダウン
-                self.attention_layers.append(self._create_layer(
-                    hidden_dim, num_heads, dropout, 
-                    receptive_field="feedback", 
-                    layer_name=layer_type
-                ))
-            else:
-                # 視床様レイヤー：調節・ゲーティング
-                self.attention_layers.append(self._create_layer(
-                    hidden_dim, num_heads, dropout, 
-                    receptive_field="gating", 
-                    layer_name=layer_type
-                ))
-        
-        # アストロサイトネットワーク（グリア細胞によるレイヤー間調整）
-        self.astrocytes = nn.ModuleList([
-            EnhancedAstrocyte(region_shape=(hidden_dim // 16, 16))
-            for _ in range(num_layers)
-        ]) if use_glia else None
-        
-        # レイヤー間時間差統合
-        self.layer_history = [[] for _ in range(num_layers)]
-        self.max_history_length = 10
-        self.temporal_importance = nn.Parameter(torch.tensor(0.7))
-        
-        # 視床様ゲーティングメカニズム（注意制御）
-        self.thalamic_gate = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Sigmoid()
-        )
-        
-        # 出力分類器
-        self.classifier = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.LayerNorm(hidden_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, num_classes)
-        )
-        
-        # パラメータ初期化
-        self._initialize_parameters()
+        # 出力層
+        self.output_layer = nn.Linear(hidden_dim, num_classes)
     
     def _create_sinusoidal_encoding(self, max_length, dim):
         """
@@ -1997,154 +1799,91 @@ class NeuroTransformerBioKAN(nn.Module):
         
         return pe.unsqueeze(0)
     
-    def _create_layer(self, hidden_dim, num_heads, dropout, receptive_field, layer_name):
+    def _create_layer(self, hidden_dim, num_heads, dropout, layer_index):
         """
         皮質層に特化したアテンションレイヤーを作成
         """
-        if receptive_field == "local":
-            # 局所的受容野のアテンション（細かい特徴検出）
+        if layer_index == 0:
+            # 感覚入力層：高解像度・局所的コンテキスト
             return LocalBiologicalAttention(
                 embed_dim=hidden_dim,
                 num_heads=num_heads,
-        dropout=dropout,
+                dropout=dropout,
                 local_context=16,  # 局所コンテキスト窓サイズ
                 neuromodulation=True
             )
-        elif receptive_field == "horizontal":
-            # 水平結合によるアテンション（特徴統合）
+        elif layer_index == 1 or layer_index == 2:
+            # 浅層：水平方向結合による特徴統合
             return HorizontalIntegrationAttention(
                 embed_dim=hidden_dim,
                 num_heads=num_heads,
                 dropout=dropout,
                 neuromodulation=True
             )
-        elif receptive_field == "medium":
-            # 中距離コンテキストアテンション
+        elif layer_index == 3:
+            # 中間層：入力統合・中距離コンテキスト
             return BiologicalMultiHeadAttention(
                 embed_dim=hidden_dim,
                 num_heads=num_heads,
                 dropout=dropout,
                 neuromodulation=True
             )
-        elif receptive_field == "global":
-            # グローバルアテンション（長距離依存性）
+        elif layer_index == 4 or layer_index == 5:
+            # 深層：広域コンテキスト・長距離依存性
             return HierarchicalMultiScaleAttention(
                 embed_dim=hidden_dim,
                 num_heads=num_heads,
                 dropout=dropout,
                 num_scales=3
             )
-        elif receptive_field == "feedback":
-            # フィードバックアテンション（トップダウン）
+        else:  # layer 6
+            # 最深層：フィードバック・トップダウン
             return FeedbackAttention(
                 embed_dim=hidden_dim,
                 num_heads=num_heads,
                 dropout=dropout,
                 neuromodulation=True
             )
-        else:  # "gating"
-            # 視床様ゲーティングアテンション
-            return ThalamicAttention(
-                embed_dim=hidden_dim,
-                num_heads=num_heads,
-                dropout=dropout,
-                neuromodulation=True
-            )
-    
-    def _initialize_parameters(self):
-        """
-        神経科学的知見に基づくパラメータ初期化
-        """
-        # 生物学的に妥当な初期化（神経科学的に正しいスケール）
-        for name, p in self.named_parameters():
-            if 'weight' in name:
-                if 'embedding' in name:
-                    # 感覚入力層：正規分布
-                    nn.init.normal_(p, mean=0.0, std=0.02)
-                elif 'layer1' in name:
-                    # 感覚層：弱いシナプス結合
-                    nn.init.normal_(p, mean=0.0, std=0.01)
-                elif 'layer5' in name:
-                    # 出力層：強いシナプス結合
-                    nn.init.normal_(p, mean=0.0, std=0.03)
-                else:
-                    # デフォルト
-                    nn.init.normal_(p, mean=0.0, std=0.02)
-            elif 'bias' in name:
-                nn.init.zeros_(p)
     
     def forward(self, x, mask=None):
-        """
-        拡張BioKANモデルのフォワードパス
+        """順伝播処理"""
+        batch_size, seq_len, _ = x.size()
         
-        Args:
-            x: 入力テンソル [batch_size, seq_len, in_features] または [batch_size, in_features]
-            mask: アテンションマスク（オプション）
-            
-        Returns:
-            出力テンソル [batch_size, num_classes]
-        """
-        # 入力形状の正規化
-        if x.dim() == 2:
-            x = x.unsqueeze(1)  # [batch_size, 1, in_features]
+        # 位置エンコーディングの適用
+        if not hasattr(self, 'pos_encoding') or self.pos_encoding.size(0) < seq_len:
+            self.pos_encoding = self._create_sinusoidal_encoding(seq_len, self.hidden_dim).to(x.device)
         
-        batch_size, seq_len, _ = x.shape
+        # 入力の埋め込み
+        h = self.embedding(x)  # (batch_size, seq_len, hidden_dim)
+        h = h + self.pos_encoding[:seq_len, :]
+        h = self.dropout(h)
         
-        # 入力埋め込み
-        h = self.embedding(x)  # [batch_size, seq_len, hidden_dim]
-        
-        # 位置エンコーディングの適用（Transformerの利点）
-        if seq_len <= self.max_seq_length:
-            h = h + self.pe_scale * self.positional_encoding[:, :seq_len, :].to(h.device)
-        
-        # 各レイヤーの出力を保存
-        layer_outputs = [h]
-        
-        # レイヤー間の処理
-        for i, attn_layer in enumerate(self.attention_layers):
-            layer_name = self.layer_mapping.get(i, f"layer{i}")
-            
-            # 前のレイヤーの状態を保存（時間差処理のため）
-            if len(self.layer_history[i]) >= self.max_history_length:
-                self.layer_history[i].pop(0)
-            self.layer_history[i].append(h.detach())
-            
-            # 層特有の処理
-            residual = h
-            
+        # 各層でのアテンション処理
+        for i, (attn_layer, norm_layer) in enumerate(zip(self.attention_layers, self.norm_layers)):
             # アテンション計算
-            if layer_name in ["layer1", "layer2_3", "layer4"]:
-                # 順伝播経路（フィードフォワード）
-                if mask is not None:
-                    h, _ = attn_layer(h, h, h, attn_mask=mask)
-                else:
-                    h, _ = attn_layer(h, h, h)
+            attn_out, _ = attn_layer(h)
+            h = h + self.dropout(attn_out)
+            h = norm_layer(h)
             
-            elif layer_name == "layer5":
-                # ワイドコンテキストアテンション（長距離依存性）
-                h = attn_layer(h)
-            
-            elif layer_name == "layer6":
-                # フィードバックアテンション（全レイヤーのコンテキスト利用）
-                context = torch.cat([out[:, -1:, :] for out in layer_outputs], dim=1)
-                h, _ = attn_layer(h, context, context)
-            
-            else:  # "thalamic"
-                # 視床様ゲーティング（選択的注意）
-                gate = self.thalamic_gate(h.mean(dim=1, keepdim=True))
-                h, _ = attn_layer(h, h, h)
-                h = h * gate  # 選択的情報通過
-            
-            # アストロサイト調節（グリア細胞モジュール）
-            if self.astrocytes is not None:
-                astrocyte = self.astrocytes[i]
-                astro_effects = astrocyte.get_modulatory_effect()
-                h = h + astro_effects['trophic_support'] * 0.2
+            # 神経修飾効果の適用
+            if self.use_neuromodulation:
+                neuromodulator_effects = self.neuromodulator.get_state()
+                self.neuromodulator.update(neuromodulator_effects)
+                h = self._apply_neuromodulatory_effects(h)
         
-        # 最終的な出力
-        output = self.classifier(h)
+        # グリア細胞の効果を適用
+        if self.use_glia:
+            for astrocyte in self.astrocytes:
+                h = h + astrocyte(h)["excitation"].unsqueeze(1)
         
-        return output
+        # 神経可塑性の効果を適用
+        if self.use_neuroplasticity:
+            h = self.neuroplasticity(h)
+        
+        # 最終的な出力層
+        h = self.output_layer(h[:, -1, :])  # 最後のトークンの状態を使用
+        
+        return h
 
 # 不足しているアテンションクラスを実装
 class LocalBiologicalAttention(BiologicalMultiHeadAttention):
