@@ -1,0 +1,25 @@
+{
+    "test_loss": 0.18206883287131786,
+    "test_accuracy": 0.9463,
+    "test_r_squared": 0.9086279273033142,
+    "model_params": {
+        "hidden_dim": 128,
+        "num_blocks": 3,
+        "total_params": 501586,
+        "trainable_params": 501586
+    },
+    "training_params": {
+        "batch_size": 32,
+        "epochs": 3,
+        "learning_rate": 0.001,
+        "weight_decay": 1e-05
+    },
+    "final_metrics": {
+        "train_loss": 0.11102629908934857,
+        "train_acc": 0.96675,
+        "train_r2": 0.9429022669792175,
+        "val_loss": 0.17494260040173928,
+        "val_acc": 0.94925,
+        "val_r2": 0.9140145182609558
+    }
+}

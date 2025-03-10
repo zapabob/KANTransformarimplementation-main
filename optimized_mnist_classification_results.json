@@ -1,0 +1,15 @@
+{
+    "hyperparameters": {
+        "learning_rate": 0.0014015504350657411,
+        "dropout": 0.4844477379586345,
+        "freeze_layers": true,
+        "weight_decay": 1.950165804883584e-05,
+        "batch_size": 32,
+        "epochs": 10,
+        "early_stopping_patience": 3
+    },
+    "training_time": 1014.6979513168335,
+    "test_results": {
+        "test_loss": 0.12236887401471462,
+        "test_accuracy": 0.965,
+        "confusion_matrix": 
