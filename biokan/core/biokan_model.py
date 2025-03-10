@@ -2006,7 +2006,7 @@ class NeuroTransformerBioKAN(nn.Module):
             return LocalBiologicalAttention(
                 embed_dim=hidden_dim,
                 num_heads=num_heads,
-                dropout=dropout,
+        dropout=dropout,
                 local_context=16,  # 局所コンテキスト窓サイズ
                 neuromodulation=True
             )
@@ -2284,3 +2284,589 @@ class ThalamicAttention(BiologicalMultiHeadAttention):
         if need_weights:
             return attn_output, attn_weights
         return attn_output
+    
+class NeoCortexBioKAN(NeuroTransformerBioKAN):
+    """
+    人間の大脳新皮質の機能をより忠実に模倣したBioKANモデル
+    
+    参考文献:
+    - Friston, K. (2010). The free-energy principle: a unified brain theory? Nature Reviews Neuroscience, 11(2), 127-138.
+    - Sporns, O. (2011). Networks of the Brain. MIT Press.
+    - Buzsáki, G. (2006). Rhythms of the Brain. Oxford University Press.
+    - Goldman-Rakic, P.S. (1995). Cellular basis of working memory. Neuron, 14(3), 477-485.
+    """
+    
+    def __init__(self, 
+                 in_features, 
+                 hidden_dim, 
+                 num_classes, 
+                 num_blocks=3,
+                 num_heads=8, 
+                 num_layers=6,
+                 dropout=0.1,
+                 max_seq_length=1024,
+                 use_neuroplasticity=True,
+                 use_glia=True,
+                 use_working_memory=True,
+                 use_predictive_coding=True,
+                 oscillatory_dynamics=True):
+        """
+        初期化メソッド
+        
+        Args:
+            in_features: 入力特徴量の次元
+            hidden_dim: 隠れ層の次元
+            num_classes: 出力クラス数
+            num_blocks: BioKANブロックの数
+            num_heads: マルチヘッドアテンションのヘッド数
+            num_layers: レイヤー数
+            dropout: ドロップアウト率
+            max_seq_length: 最大シーケンス長
+            use_neuroplasticity: 神経可塑性モジュールを使用するか
+            use_glia: グリア細胞モジュールを使用するか
+            use_working_memory: ワーキングメモリモジュールを使用するか
+            use_predictive_coding: 予測符号化モジュールを使用するか
+            oscillatory_dynamics: 脳波に似た振動ダイナミクスを使用するか
+        """
+        super().__init__(in_features, hidden_dim, num_classes, num_blocks, 
+                        num_heads, num_layers, dropout, max_seq_length,
+                        use_neuroplasticity, use_glia)
+        
+        self.use_working_memory = use_working_memory
+        self.use_predictive_coding = use_predictive_coding
+        self.oscillatory_dynamics = oscillatory_dynamics
+        
+        # 脳波パターン生成器（θ, α, β, γ, δ波）
+        self.oscillation_generators = nn.ModuleDict({
+            'theta': nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // 4),
+                nn.SiLU(),
+                nn.Linear(hidden_dim // 4, hidden_dim),
+                nn.Sigmoid()
+            ),
+            'alpha': nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // 4),
+                nn.SiLU(),
+                nn.Linear(hidden_dim // 4, hidden_dim),
+                nn.Sigmoid()
+            ),
+            'beta': nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // 4),
+                nn.SiLU(),
+                nn.Linear(hidden_dim // 4, hidden_dim),
+                nn.Sigmoid()
+            ),
+            'gamma': nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // 4),
+                nn.SiLU(),
+                nn.Linear(hidden_dim // 4, hidden_dim),
+                nn.Sigmoid()
+            ),
+            'delta': nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // 4),
+                nn.SiLU(),
+                nn.Linear(hidden_dim // 4, hidden_dim),
+                nn.Sigmoid()
+            )
+        })
+        
+        # ワーキングメモリモジュール（Goldman-Rakic, 1995に基づく前頭前皮質モデル）
+        if use_working_memory:
+            self.working_memory = WorkingMemoryModule(hidden_dim)
+        
+        # 予測符号化モジュール（Friston, 2010の自由エネルギー原理に基づく）
+        if use_predictive_coding:
+            self.predictive_coder = PredictiveCodingModule(hidden_dim)
+            
+        # デフォルトモードネットワーク（自己参照処理と内部思考）
+        self.default_mode_network = DefaultModeNetworkModule(hidden_dim)
+        
+        # 大脳皮質層構造（層I～VIの模倣）
+        self.cortical_layers = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.SiLU()
+            ) for _ in range(6)  # 6層構造
+        ])
+        
+        # 高次認知機能モジュール
+        self.higher_cognition = HigherCognitionModule(hidden_dim)
+    
+    def forward(self, x, mask=None, context=None, memory_state=None):
+        """順伝播処理
+        
+        Args:
+            x: 入力テンソル [batch_size, seq_length, in_features]
+            mask: 注意マスク
+            context: コンテキスト情報
+            memory_state: 外部記憶状態
+            
+        Returns:
+            output: モデル出力
+            memory_state: 更新された記憶状態
+            predictive_error: 予測誤差
+            attention_maps: 注意マップ
+        """
+        batch_size, seq_length = x.size(0), x.size(1)
+        
+        # 標準的なTransformerベースの処理
+        h = super().forward(x, mask)
+        
+        # 皮質層処理（層I～VIの情報処理）
+        layer_outputs = []
+        cortical_input = h
+        for i, layer in enumerate(self.cortical_layers):
+            cortical_output = layer(cortical_input)
+            # 層間の接続パターン（生物学的に妥当）
+            if i > 0:
+                # 上位層から下位層へのフィードバック
+                cortical_output = cortical_output + 0.1 * layer_outputs[i-1]
+            if i < 5:
+                # 下位層への浅いスキップ接続
+                cortical_input = cortical_output
+            else:
+                # 最終層は統合的な表現を形成
+                cortical_input = cortical_output + sum(layer_outputs) * 0.05
+            layer_outputs.append(cortical_output)
+            
+        # 脳波リズムの適用（θ, α, β, γ, δ波）
+        if self.oscillatory_dynamics:
+            oscillation_effects = []
+            # 各周波数帯域の生成と適用
+            for name, generator in self.oscillation_generators.items():
+                wave = generator(cortical_output)
+                if name == 'theta':
+                    # θ波: 記憶と空間ナビゲーション
+                    wave = wave * torch.sin(torch.linspace(0, 6*torch.pi, seq_length).to(x.device)).unsqueeze(0).unsqueeze(-1)
+                elif name == 'alpha':
+                    # α波: 静止状態と抑制
+                    wave = wave * torch.sin(torch.linspace(0, 10*torch.pi, seq_length).to(x.device)).unsqueeze(0).unsqueeze(-1)
+                elif name == 'beta':
+                    # β波: 認知処理と注意
+                    wave = wave * torch.sin(torch.linspace(0, 20*torch.pi, seq_length).to(x.device)).unsqueeze(0).unsqueeze(-1)
+                elif name == 'gamma':
+                    # γ波: 高度な認知処理と結合
+                    wave = wave * torch.sin(torch.linspace(0, 40*torch.pi, seq_length).to(x.device)).unsqueeze(0).unsqueeze(-1)
+                else:  # delta
+                    # δ波: 深い睡眠/休息
+                    wave = wave * torch.sin(torch.linspace(0, 3*torch.pi, seq_length).to(x.device)).unsqueeze(0).unsqueeze(-1)
+                oscillation_effects.append(wave)
+            
+            # 脳波モジュレーション効果の合成
+            oscillation_modulation = sum(oscillation_effects) / len(oscillation_effects)
+            cortical_output = cortical_output * (1.0 + 0.2 * oscillation_modulation)
+        
+        # ワーキングメモリの適用
+        if self.use_working_memory and memory_state is not None:
+            cortical_output, memory_state = self.working_memory(cortical_output, memory_state)
+        elif self.use_working_memory:
+            cortical_output, memory_state = self.working_memory(cortical_output)
+        
+        # 予測符号化の適用
+        if self.use_predictive_coding:
+            cortical_output, predictive_error = self.predictive_coder(cortical_output, x)
+        else:
+            predictive_error = None
+            
+        # デフォルトモードネットワーク（自己参照的思考）の適用
+        if context is not None:
+            cortical_output = self.default_mode_network(cortical_output, context)
+        else:
+            cortical_output = self.default_mode_network(cortical_output)
+            
+        # 高次認知機能の適用（アナロジー、抽象思考など）
+        cortical_output = self.higher_cognition(cortical_output)
+        
+        # 最終出力層
+        output = self.classifier(cortical_output)
+        
+        if self.use_working_memory and self.use_predictive_coding:
+            return output, memory_state, predictive_error, self.attention_weights
+        elif self.use_working_memory:
+            return output, memory_state, None, self.attention_weights
+        elif self.use_predictive_coding:
+            return output, None, predictive_error, self.attention_weights
+        else:
+            return output, None, None, self.attention_weights
+
+class WorkingMemoryModule(nn.Module):
+    """
+    前頭前皮質に基づくワーキングメモリモジュール
+    
+    参考文献:
+    - Goldman-Rakic, P.S. (1995). Cellular basis of working memory. Neuron, 14(3), 477-485.
+    - Baddeley, A. (2012). Working memory: theories, models, and controversies. Annual Review of Psychology, 63, 1-29.
+    """
+    
+    def __init__(self, hidden_dim, capacity=5, decay_factor=0.95):
+        """
+        初期化メソッド
+        
+        Args:
+            hidden_dim: 隠れ層の次元
+            capacity: メモリの容量（項目数）
+            decay_factor: 記憶減衰係数
+        """
+        super().__init__()
+        
+        self.hidden_dim = hidden_dim
+        self.capacity = capacity
+        self.decay_factor = decay_factor
+        
+        # ゲート機構
+        self.update_gate = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.Sigmoid()
+        )
+        
+        self.forget_gate = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.Sigmoid()
+        )
+        
+        # 記憶更新機構
+        self.memory_transform = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.Tanh()
+        )
+        
+        # 注意機構
+        self.attention = BiologicalMultiHeadAttention(
+            hidden_dim, num_heads=4, dropout=0.1, neuromodulation=True
+        )
+        
+    def forward(self, x, memory_state=None):
+        """
+        順伝播処理
+        
+        Args:
+            x: 入力テンソル [batch_size, hidden_dim]
+            memory_state: 現在のメモリ状態（Noneの場合は初期化）
+            
+        Returns:
+            output: 処理後の出力
+            updated_memory: 更新されたメモリ状態
+        """
+        batch_size = x.size(0)
+        
+        # メモリの初期化（存在しない場合）
+        if memory_state is None:
+            memory_state = torch.zeros(batch_size, self.capacity, self.hidden_dim, device=x.device)
+        
+        # 入力データとメモリの各スロットを結合して処理
+        memory_inputs = []
+        for i in range(self.capacity):
+            memory_slot = memory_state[:, i, :]
+            combined = torch.cat([x, memory_slot], dim=1)
+            memory_inputs.append(combined)
+            
+        # 各メモリスロットに対してゲート処理
+        updated_memory = []
+        for i in range(self.capacity):
+            combined = memory_inputs[i]
+            
+            # ゲート計算
+            update = self.update_gate(combined)
+            forget = self.forget_gate(combined)
+            
+            # 新しいメモリコンテンツの計算
+            new_memory = self.memory_transform(combined)
+            
+            # メモリ更新
+            slot = memory_state[:, i, :]
+            updated_slot = forget * slot + update * new_memory
+            
+            # 減衰係数の適用（経時的な記憶衰退）
+            updated_slot = updated_slot * self.decay_factor
+            
+            updated_memory.append(updated_slot.unsqueeze(1))
+            
+        # 更新されたメモリを結合
+        updated_memory = torch.cat(updated_memory, dim=1)
+        
+        # メモリから情報を取得するための注意機構
+        memory_query = x.unsqueeze(1)
+        memory_output, _ = self.attention(memory_query, updated_memory, updated_memory)
+        memory_output = memory_output.squeeze(1)
+        
+        # 最終出力（入力と記憶の組み合わせ）
+        output = x + memory_output
+        
+        return output, updated_memory
+
+class PredictiveCodingModule(nn.Module):
+    """
+    予測符号化モジュール - Fristonの自由エネルギー原理に基づく
+    
+    参考文献:
+    - Friston, K. (2010). The free-energy principle: a unified brain theory? Nature Reviews Neuroscience, 11(2), 127-138.
+    - Rao, R.P., & Ballard, D.H. (1999). Predictive coding in the visual cortex. Nature Neuroscience, 2(1), 79-87.
+    """
+    
+    def __init__(self, hidden_dim, prediction_levels=3):
+        """
+        初期化メソッド
+        
+        Args:
+            hidden_dim: 隠れ層の次元
+            prediction_levels: 予測階層の数
+        """
+        super().__init__()
+        
+        self.hidden_dim = hidden_dim
+        self.prediction_levels = prediction_levels
+        
+        # 階層的予測ネットワーク
+        self.prediction_networks = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.SiLU(),
+                nn.Linear(hidden_dim, hidden_dim)
+            ) for _ in range(prediction_levels)
+        ])
+        
+        # 予測誤差の計算と伝播
+        self.error_units = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.Tanh()
+            ) for _ in range(prediction_levels)
+        ])
+        
+        # 精度の推定（予測誤差の重み付け）
+        self.precision_estimators = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.Softplus()
+            ) for _ in range(prediction_levels)
+        ])
+        
+    def forward(self, x, target=None):
+        """
+        順伝播処理
+        
+        Args:
+            x: 入力表現 [batch_size, hidden_dim]
+            target: 予測ターゲット（指定されていない場合は入力を使用）
+            
+        Returns:
+            output: 処理後の出力
+            prediction_error: 予測誤差
+        """
+        if target is None:
+            target = x
+            
+        batch_size = x.size(0)
+        current_state = x
+        
+        # 予測誤差の蓄積
+        all_prediction_errors = []
+        
+        # 階層的な予測処理
+        for level in range(self.prediction_levels):
+            # 現在の状態から予測を生成
+            prediction = self.prediction_networks[level](current_state)
+            
+            # 予測誤差の計算
+            if level == 0:
+                prediction_error = target - prediction
+            else:
+                prediction_error = current_state - prediction
+                
+            # 精度の推定と適用
+            precision = self.precision_estimators[level](current_state)
+            weighted_error = prediction_error * precision
+            
+            # 誤差ユニットによる処理
+            processed_error = self.error_units[level](weighted_error)
+            all_prediction_errors.append(processed_error)
+            
+            # 次の階層への状態更新
+            current_state = current_state + 0.1 * processed_error
+        
+        # 予測誤差の合計
+        total_prediction_error = sum(all_prediction_errors)
+        
+        # 最終出力（最上位の状態と予測誤差の組み合わせ）
+        output = current_state + 0.05 * total_prediction_error
+        
+        return output, total_prediction_error
+
+class DefaultModeNetworkModule(nn.Module):
+    """
+    デフォルトモードネットワークモジュール - 自己参照的思考と内省を模倣
+    
+    参考文献:
+    - Raichle, M.E., et al. (2001). A default mode of brain function. PNAS, 98(2), 676-682.
+    - Buckner, R.L., et al. (2008). The brain's default network. Annals of the New York Academy of Sciences, 1124(1), 1-38.
+    """
+    
+    def __init__(self, hidden_dim):
+        """
+        初期化メソッド
+        
+        Args:
+            hidden_dim: 隠れ層の次元
+        """
+        super().__init__()
+        
+        # 自己参照モジュール
+        self.self_reference = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+        
+        # エピソード記憶の集積
+        self.episodic_memory = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+        
+        # 心的時間旅行（過去と未来の思考）
+        self.mental_time_travel = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * 2),
+            nn.LayerNorm(hidden_dim * 2),
+            nn.SiLU(),
+            nn.Linear(hidden_dim * 2, hidden_dim)
+        )
+        
+        # 社会的認知
+        self.social_cognition = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+        
+    def forward(self, x, context=None):
+        """
+        順伝播処理
+        
+        Args:
+            x: 入力表現 [batch_size, hidden_dim]
+            context: コンテキスト情報（オプション）
+            
+        Returns:
+            output: 処理後の出力
+        """
+        # 自己参照処理
+        self_ref = self.self_reference(x)
+        
+        # エピソード記憶の統合
+        if context is not None:
+            episodic = self.episodic_memory(torch.cat([x, context], dim=1))
+        else:
+            # コンテキストがない場合、自己生成したコンテキストを使用
+            temp_context = self.mental_time_travel(x)
+            episodic = self.episodic_memory(torch.cat([x, temp_context], dim=1))
+        
+        # 心的時間旅行
+        time_travel = self.mental_time_travel(x)
+        
+        # 社会的認知
+        social = self.social_cognition(x)
+        
+        # 全ての処理を統合
+        output = x + 0.2 * self_ref + 0.2 * episodic + 0.1 * time_travel + 0.1 * social
+        
+        return output
+
+class HigherCognitionModule(nn.Module):
+    """
+    高次認知機能モジュール - 抽象思考、アナロジー、推論など
+    
+    参考文献:
+    - Lake, B.M., et al. (2017). Building machines that learn and think like people. Behavioral and Brain Sciences, 40, e253.
+    - Lenat, D.B. (1995). CYC: A large-scale investment in knowledge infrastructure. Communications of the ACM, 38(11), 33-38.
+    """
+    
+    def __init__(self, hidden_dim):
+        """
+        初期化メソッド
+        
+        Args:
+            hidden_dim: 隠れ層の次元
+        """
+        super().__init__()
+        
+        # 抽象思考
+        self.abstraction = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * 2),
+            nn.LayerNorm(hidden_dim * 2),
+            nn.SiLU(),
+            nn.Linear(hidden_dim * 2, hidden_dim)
+        )
+        
+        # アナロジー推論
+        self.analogy = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+        
+        # 因果推論
+        self.causal_reasoning = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+        
+        # メタ認知
+        self.metacognition = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.LayerNorm(hidden_dim // 2),
+            nn.SiLU(),
+            nn.Linear(hidden_dim // 2, hidden_dim)
+        )
+        
+        # 創造性
+        self.creativity = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * 2),
+            nn.LayerNorm(hidden_dim * 2),
+            nn.SiLU(),
+            nn.Dropout(0.3),  # ランダム性を導入
+            nn.Linear(hidden_dim * 2, hidden_dim)
+        )
+        
+    def forward(self, x):
+        """
+        順伝播処理
+        
+        Args:
+            x: 入力表現 [batch_size, hidden_dim]
+            
+        Returns:
+            output: 処理後の出力
+        """
+        # 抽象思考
+        abstract = self.abstraction(x)
+        
+        # アナロジー推論
+        analog = self.analogy(x)
+        
+        # 因果推論
+        causal = self.causal_reasoning(x)
+        
+        # メタ認知（自己の思考についての思考）
+        meta = self.metacognition(x)
+        
+        # 創造性
+        creative = self.creativity(x)
+        
+        # 全ての高次認知機能を統合
+        output = x + 0.15 * abstract + 0.15 * analog + 0.1 * causal + 0.1 * meta + 0.1 * creative
+        
+        return output
+    

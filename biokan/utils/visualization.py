@@ -11,7 +11,12 @@ from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.animation import FuncAnimation
 import io
 import base64
-from IPython.display import HTML
+try:
+    from IPython.display import HTML
+    HAS_IPYTHON = True
+except ImportError:
+    HAS_IPYTHON = False
+    print("Warning: IPython not found. Some visualization features will be limited.")
 
 
 def visualize_layer_activations(model, sample_input, layer_indices=None, cmap='viridis'):
@@ -275,16 +280,14 @@ def animate_calcium_waves(astrocyte, n_frames=30, interval=100):
     # アニメーション作成
     ani = FuncAnimation(fig, update, frames=n_frames, interval=interval, blit=True)
     
-    # HTMLとして返す（Jupyter Notebook用）
-    with io.BytesIO() as buf:
-        ani.save(buf, format='gif', writer='pillow', fps=10)
-        buf.seek(0)
-        data = base64.b64encode(buf.read()).decode('ascii')
-    
-    html = f'<img src="data:image/gif;base64,{data}" alt="Calcium Wave Animation" />'
-    
-    plt.close(fig)
-    return HTML(html)
+    # HTMLとしてアニメーションを表示
+    if HAS_IPYTHON:
+        plt.close()
+        return HTML(ani.to_html5_video())
+    else:
+        # IPythonがない場合、アニメーションを表示
+        plt.show()
+        return ani
 
 
 def plot_layer_temporal_integration(model, ax=None):
