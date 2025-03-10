@@ -1,119 +1,89 @@
-# BioKAN: 生体模倣コルモゴロフ・アーノルド・ネットワーク
+# BioKAN: 生物学的メカニズムを導入した深層学習モデル
 
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-orange)](https://pytorch.org/)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
-BioKANは、コルモゴロフ・アーノルド・ネットワーク（KAN）を拡張して神経科学的原理を統合し、より透明で説明可能な深層学習アーキテクチャを提供するフレームワークです。
+## 概要
+BioKANは、生物学的なニューロモジュレーションと注意機構を組み込んだ深層学習モデルです。
+MNISTやFashion-MNIST、CIFAR-10などの画像分類タスクに対応しています。
 
-## プロジェクト概要
-
-BioKANは以下の特徴を持っています：
-
-1. **神経伝達物質システム**: ドーパミン、セロトニン、ノルアドレナリン、アセチルコリンなどの神経伝達物質の動態をシミュレートし、ネットワークの動作を調整します。
-
-2. **グリア細胞モデル**: アストロサイトとミクログリアなどのグリア細胞が神経回路に与える影響をモデル化し、恒常性維持や情報処理への貢献を表現します。
-
-3. **バイオロジカルアテンション**: 生物学的に着想を得たアテンションメカニズムにより、情報処理の選択性と階層性を実現します。
-
-4. **説明可能AIコンポーネント**: モデルの内部状態を分析し、神経科学的視点から意思決定プロセスを解釈する機能を提供します。
-
-5. **可視化ツール**: 神経活動、神経伝達物質の動態、アテンションパターンなどを可視化するためのツールセットを備えています。
-
-## インストール方法
-
-このリポジトリをクローンし、必要なパッケージをインストールします：
-
+## インストール
 ```bash
-git clone https://github.com/zapabob/biokanimplimention.git
-cd biokan
 pip install -r requirements.txt
 ```
 
 ## 使用方法
 
-### 基本的な分類器の作成
-
-BioKANを使用して分類器を作成する基本的な例：
-
-```python
-import torch
-from biokan.core.biokan_model import create_biokan_classifier
-
-# モデルの作成
-model = create_biokan_classifier(
-    in_features=784,       # 入力特徴量の数
-    hidden_dim=128,        # 隠れ層の次元
-    num_classes=10,        # 出力クラス数
-    num_blocks=3,          # BioKANブロック数
-    attention_type='biological',  # アテンションタイプ
-    neuromodulation=True   # 神経調節を有効にする
-)
-
-# 入力データの準備
-batch_size = 32
-x = torch.randn(batch_size, 784)  # 例: MNISTデータ
-
-# 推論
-logits = model(x)
-predictions = torch.argmax(logits, dim=1)
+### 1. 基本訓練
+MNISTデータセットでの基本的な訓練:
+```powershell
+python scripts/train/train_unified.py --mode train --dataset mnist --hidden-dim 128 --num-blocks 3 --attention-type biological --epochs 100
 ```
 
-### 説明可能性の利用
-
-モデルの予測を説明する例：
-
-```python
-from biokan.xai.explainers import BioKANExplainer
-from biokan.visualization.visualizers import visualize_explanation
-import matplotlib.pyplot as plt
-
-# 説明者を初期化
-explainer = BioKANExplainer(model)
-
-# 入力サンプルを準備
-input_sample = torch.randn(1, 784)  # 単一サンプル
-target = torch.tensor([3])          # 例: ラベル
-
-# 分析を実行
-explanation = explainer.analyze(input_sample, target)
-
-# 反事実的説明を生成
-counterfactual = explainer.create_counterfactual(
-    input_sample, 
-    target_class=5,  # 目標クラス
-    max_iterations=50
-)
-
-# 説明を可視化
-figures = visualize_explanation(explanation)
-
-# 図を表示
-for name, fig in figures.items():
-    plt.figure(fig.number)
-    plt.title(name)
-    plt.show()
+### 2. 転移学習
+事前学習済みモデルを使用した転移学習:
+```powershell
+python scripts/train/train_unified.py --mode transfer --dataset fashion_mnist --source-model results/train/mnist/best_train_model.pth --freeze-layers 2
 ```
 
-### MNISTデータセットでの例
-
-付属のMNIST分類例を実行：
-
-```bash
-python -m biokan.examples.simple_classifier --epochs 5 --hidden_dim 128 --num_blocks 2 --explain
+### 3. 実験実行と比較
+異なる注意機構の比較実験:
+```powershell
+python scripts/train/train_unified.py --mode experiment --dataset mnist --experiment-name "biological_attention" --compare-with "cortical_attention" "hierarchical_attention"
 ```
 
-オプション:
-- `--batch_size`: バッチサイズ（デフォルト: 128）
-- `--epochs`: 訓練エポック数（デフォルト: 5）
-- `--lr`: 学習率（デフォルト: 0.001）
-- `--hidden_dim`: 隠れ層の次元（デフォルト: 128）
-- `--num_blocks`: BioKANブロック数（デフォルト: 2）
-- `--attention_type`: アテンションタイプ（biological, cortical, hierarchical）
-- `--neuromodulation`: 神経調節を有効にする
-- `--save_dir`: 出力保存ディレクトリ
-- `--explain`: 予測の説明を生成する
-- `--num_explain`: 説明するサンプル数（デフォルト: 5）
+### 4. ハイパーパラメータ最適化
+Optunaを使用した最適化:
+```powershell
+python scripts/optimize/optimize_unified.py --dataset mnist --n-trials 100 --study-name "mnist_optimization" --storage "sqlite:///results/optimization/mnist/study.db"
+```
+
+## 主要パラメータ
+
+### 訓練スクリプト (`train_unified.py`)
+- `--mode`: 実行モード（train/transfer/experiment）
+- `--dataset`: データセット（mnist/fashion_mnist/cifar10/svhn）
+- `--hidden-dim`: 隠れ層の次元数
+- `--num-blocks`: BioKANブロック数
+- `--attention-type`: 注意機構タイプ（biological/cortical/hierarchical）
+- `--batch-size`: バッチサイズ
+- `--epochs`: 訓練エポック数
+- `--lr`: 学習率
+
+### 最適化スクリプト (`optimize_unified.py`)
+- `--n-trials`: 最適化試行回数
+- `--study-name`: Optunaスタディ名
+- `--storage`: データベースストレージURL
+- `--epochs`: 各試行の訓練エポック数
+
+## プロジェクト構造
+```
+.
+├── biokan/              # メインパッケージ
+├── scripts/             # 実行スクリプト
+│   ├── train/          # 訓練関連スクリプト
+│   └── optimize/       # 最適化関連スクリプト
+├── tests/              # テストケース
+├── results/            # 実験結果
+├── docs/               # ドキュメント
+└── requirements.txt    # 依存パッケージ
+```
+
+## テスト実行
+```powershell
+python -m pytest tests/
+```
+
+## CI/CD
+GitHub Actionsを使用して、以下のワークフローを自動化:
+- コードの品質チェック
+- テストの実行
+- ドキュメントの生成
+- パッケージのビルドと公開
+
+## ライセンス
+MITライセンス
 
 ## モジュール構成
 
