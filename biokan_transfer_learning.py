@@ -177,11 +177,12 @@ class TransferBioKANModel(nn.Module):
             print(f"TransferBioKANModel 入力形状: {x.shape}, タイプ: {type(x)}")
             
         # 入力形状の確認と修正
-        batch_size = x.size(0)
+        # batch_size = x.size(0)  # 未使用変数を削除
+        current_state = x
             
         # MNISTデータの場合（B, 1, 28, 28）から（B, 784）に変換
         if len(x.shape) == 4 and x.shape[1] == 1 and x.shape[2] == 28 and x.shape[3] == 28:
-            x = x.reshape(batch_size, -1)
+            x = x.reshape(x.size(0), -1)
             if verbose:
                 print(f"  形状を変換: {x.shape}")
                 
@@ -194,13 +195,13 @@ class TransferBioKANModel(nn.Module):
             # 画像セグメンテーション処理
             # 入力画像から特徴を抽出
             with torch.set_grad_enabled(not self.freeze_pretrained):
-                _, activations = self.pretrained_model(x.view(batch_size, -1), return_activations=True)
+                _, activations = self.pretrained_model(x.view(x.size(0), -1), return_activations=True)
                 features = activations['block_2'].squeeze(1)  # [batch, hidden_dim]
             
             # 特徴をデコーダーに適した形状に変換
             img_size = self.additional_params.get('img_size', 28)
             features_2d = self.feature_reshape(features)
-            features_2d = features_2d.view(batch_size, -1, img_size // 4, img_size // 4)
+            features_2d = features_2d.view(x.size(0), -1, img_size // 4, img_size // 4)
         
             # デコーダーでセグメンテーションマスクを生成
             output = self.decoder(features_2d)  # [batch, num_classes, H, W]

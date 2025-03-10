@@ -16,7 +16,10 @@ from biokan.neuro.glial_cells import Astrocyte, Microglia
 
 
 class BiologicalMultiHeadAttention(MultiHeadAttention):
-    """神経学的特性を持つマルチヘッドアテンション層"""
+    """
+    生物学的な特性を持つマルチヘッドアテンション
+    アストロサイトの調節効果と神経伝達物質の影響を取り入れる
+    """
     
     def __init__(self, embed_dim, num_heads, dropout=0.0, neuromodulation=True):
         """
@@ -25,102 +28,110 @@ class BiologicalMultiHeadAttention(MultiHeadAttention):
         Args:
             embed_dim: 埋め込み次元
             num_heads: ヘッド数
-            dropout: ドロップアウト確率
-            neuromodulation: 神経調節を有効にするかどうか
+            dropout: ドロップアウト率
+            neuromodulation: 神経調節を行うかどうか
         """
         super().__init__(embed_dim, num_heads, dropout)
+        # 神経調節フラグを保存
+        self.neuromodulation = neuromodulation
         
         # 神経調節システム（オプション）
-        self.neuromodulator = NeuromodulatorSystem() if neuromodulation else None
-        
-        # アストロサイト活動（オプション）
+        self.neuromodulator = None
         if neuromodulation:
-            self.astrocyte = Astrocyte(region_shape=(num_heads, embed_dim // num_heads))
-        else:
-            self.astrocyte = None
+            from biokan.neuro import NeuromodulatorSystem
+            self.neuromodulator = NeuromodulatorSystem()
         
-        # ヘッドごとの活性化閾値（これはニューロンの発火閾値に相当）
+        # アストロサイトの初期化
+            self.astrocyte = None
+        if neuromodulation:
+            self.astrocyte = EnhancedAstrocyte(
+                region_shape=(num_heads, embed_dim // num_heads),
+                activation_threshold=0.7,
+                decay_rate=0.05,
+                diffusion_rate=0.1
+            )
+        
+        # ヘッドごとの活性化閾値
         self.head_thresholds = nn.Parameter(torch.ones(num_heads) * 0.1)
         
-        # アテンション重みキャッシュ（説明可能性のため）
+        # アテンション重みのキャッシュ（説明可能性のため）
         self.attention_weights = None
     
     def forward(self, query, key, value, attn_mask=None, need_weights=False):
         """
-        フォワードパス
+        バイオロジカルな機構を持つマルチヘッドアテンションの順伝播
+        アストロサイト様のグルタミン酸調節と神経伝達物質調節を追加
         
         Args:
             query: クエリテンソル
             key: キーテンソル
             value: バリューテンソル
             attn_mask: アテンションマスク
-            need_weights: 重みを返すかどうか
+            need_weights: アテンション重みを返すかどうか
             
         Returns:
-            出力テンソルとオプションのアテンション重み
+            attn_output: アテンション出力
+            attn_output_weights: アテンション重み（オプション）
         """
-        # 基本的なアテンション計算
-        attn_output, attn_weights = super().forward(query, key, value, attn_mask, True)
+        # 通常のMultiHeadAttentionを実行
+        attn_output, attn_output_weights = super().forward(query, key, value, attn_mask, need_weights=True)
         
-        # アテンション重みをキャッシュ
-        self.attention_weights = attn_weights.detach()
-        
-        # 神経調節システムがある場合
-        if self.neuromodulator is not None:
-            # アテンション活動に基づく神経調節の更新
-            attn_activity = attn_weights.mean(dim=1).mean(dim=0)  # ヘッドごとの平均アテンション
+        if self.neuromodulation:
+            # グルタミン酸放出をシミュレート（注意の強度に比例）
+            glutamate_release = attn_output_weights.mean(dim=1).mean(dim=1)  # [batch_size]
             
-            # 神経伝達物質レベルの更新
-            neuromodulator_effects = {
-                'dopamine': 0.2 * attn_activity.max().item(),       # 最大アテンションに応じた報酬
-                'acetylcholine': 0.1 * attn_activity.mean().item(), # 平均アテンションに応じた注意
-                'serotonin': -0.05 * (attn_weights.var().item()),   # アテンションのばらつきが大きいと抑制的
-                'noradrenaline': 0.15 if attn_activity.max().item() > 0.7 else -0.05  # 強いアテンションで覚醒
-            }
+            # アストロサイトによるグルタミン酸の取り込み（局所的な調節）
+            glutamate_threshold = 0.7
+            glutamate_uptake = torch.sigmoid(glutamate_release - glutamate_threshold)
             
-            self.neuromodulator.update(stimuli=neuromodulator_effects)
+            # グルタミン酸取り込みの効果を出力に適用
+            batch_size = attn_output.size(0)
+            seq_len = attn_output.size(1)
+            hidden_dim = attn_output.size(2)
+            glutamate_uptake = glutamate_uptake.view(batch_size, 1, 1).expand(batch_size, seq_len, hidden_dim)
             
-            # 現在の神経伝達物質状態を取得
-            neuro_state = self.neuromodulator.get_state()
+            # 取り込みが高いほど出力は調節される（抑制的効果）
+            attn_output = attn_output * (1.0 - glutamate_uptake * 0.3)
             
-            # アテンション出力の調整
-            dopamine_effect = 1.0 + 0.2 * neuro_state['dopamine']  # ドーパミンによる信号増幅
-            serotonin_effect = 1.0 - 0.1 * neuro_state['serotonin'] if neuro_state['serotonin'] > 0 else 1.0 + 0.05 * abs(neuro_state['serotonin'])
-            
-            # ドーパミンとセロトニンによる出力調整
-            attn_output = attn_output * dopamine_effect * serotonin_effect
-            
-            # アストロサイトの更新
+            # アストロサイトの状態を更新
             if self.astrocyte is not None:
-                # アテンションをニューロン活性として解釈
-                neural_activity = torch.reshape(attn_output[0], self.astrocyte.region_shape).detach().cpu().numpy()
-                
-                # アストロサイト状態の更新
-                self.astrocyte.update(neural_activity)
+                # 最初のサンプルのアテンション出力を使用してアストロサイトを更新
+                astro_input = attn_output[0].reshape(self.astrocyte.region_shape)
+                self.astrocyte.update(astro_input)
                 
                 # アストロサイトの調節効果を取得
-                astro_effects = self.astrocyte.get_modulatory_effect()
+                modulatory_effect = self.astrocyte.get_modulatory_effect()
                 
-                # グルタミン酸・GABA取り込みの効果をアテンションに適用
-                # （テンソルに変換して形状を合わせる）
-                glutamate_uptake = torch.tensor(astro_effects['glutamate_uptake'], device=attn_output.device)
-                synapse_mod = torch.tensor(astro_effects['synapse_modulation'], device=attn_output.device)
+                # 調節効果を全バッチに適用
+                modulatory_effect = modulatory_effect['calcium'].view(1, 1, -1).expand_as(attn_output)
+                attn_output = attn_output * (1.0 + modulatory_effect * 0.2)
+            
+            # 神経伝達物質の影響を適用
+            if self.neuromodulator is not None:
+                # 神経伝達物質の状態を更新
+                self.neuromodulator.update({
+                    'attention': attn_output_weights.mean().item(),
+                    'activity': attn_output.abs().mean().item()
+                })
                 
-                # アストロサイトの効果を適用（次元を合わせる必要あり）
-                glutamate_uptake = glutamate_uptake.view(*self.astrocyte.region_shape, 1).expand(-1, -1, attn_output.size(1))
-                synapse_mod = synapse_mod.view(*self.astrocyte.region_shape, 1).expand(-1, -1, attn_output.size(1))
+                # 調節効果を取得
+                neuromod_effect = self.neuromodulator.get_state()
                 
-                # 次元を合わせる
-                glutamate_uptake = glutamate_uptake.reshape(attn_output.shape)
-                synapse_mod = synapse_mod.reshape(attn_output.shape)
+                # セロトニンとドーパミンの効果を適用
+                serotonin = neuromod_effect.get('serotonin', 1.0)
+                dopamine = neuromod_effect.get('dopamine', 1.0)
                 
-                # アストロサイト効果の適用
-                attn_output = attn_output * glutamate_uptake * synapse_mod
+                # 注意の選択性を調整
+                attn_output = attn_output * (1.0 + 0.1 * serotonin)
+                
+                # 報酬関連の活性を調整
+                if dopamine > 1.2:
+                    attn_output = attn_output * 1.1
         
-        if need_weights:
-            return attn_output, attn_weights
-        else:
-            return attn_output
+        # アテンション重みをキャッシュ
+        self.attention_weights = attn_output_weights
+        
+        return attn_output, attn_output_weights if need_weights else None
 
 
 class BioKANBlock(nn.Module):
@@ -873,6 +884,7 @@ class NeuroplasticityModule(nn.Module):
         dmn_factor = (2.0 - self.plasticity_state['default_mode_network_activity']) * 0.5
         
         # DMN抑制による機能的統合の増加（Carhart-Harris et al., 2016）
+        # バッチサイズを取得して実際に使用
         batch_size = x.size(0)
         connectivity = self.connectivity_mask.unsqueeze(0).expand(batch_size, -1, -1)
         x_expanded = x.unsqueeze(2)
@@ -1070,7 +1082,7 @@ class NeuropharmacologicalBioKAN(nn.Module):
         # 活動量に基づく刺激を計算
         average_activation = h.abs().mean().item()
         max_activation = h.abs().max().item()
-        
+            
         # 神経伝達物質への刺激
         stimuli = {
             'glutamate': average_activation * 0.8,
@@ -1194,8 +1206,8 @@ class NeuropharmacologicalBioKAN(nn.Module):
     def _process_cortical_layer_dynamics(self, layer_activities):
         """
         皮質層間のダイナミクスを処理
-        
-        Args:
+    
+    Args:
             layer_activities: 各皮質層の活動 [6 x batch_size x hidden_dim]
             
         Returns:
@@ -1257,11 +1269,25 @@ class NeuropharmacologicalBioKAN(nn.Module):
         return final_activity
     
     def _update_monitoring(self):
-        """
-        監視データの更新
-        """
-        # 実装省略（実際の実装はここに依存）
-        pass
+        """モニタリング情報の更新"""
+        # 活性化レベルの計算
+        average_activation = self.layer_activities[-1].mean().item()
+        max_activation = self.layer_activities[-1].max().item()
+        attention_level = self.attention_weights.mean().item() if hasattr(self, 'attention_weights') else 0.5
+        arousal_level = max(0.2, min(0.8, average_activation))
+        stability_level = 1.0 - torch.var(self.layer_activities[-1]).item()
+        
+        # 神経伝達物質への刺激を設定
+        stimuli = {
+            'glutamate': average_activation * 0.8,
+            'gaba': (1.0 - average_activation) * 0.6,
+            'dopamine': max_activation * 0.6 - 0.2,
+            'acetylcholine': attention_level * 0.7,
+            'noradrenaline': arousal_level * 0.8,
+            'serotonin': stability_level * 0.5
+        }
+        
+        return stimuli
     
     def _apply_neuromodulatory_effects(self, h):
         """
@@ -1271,34 +1297,32 @@ class NeuropharmacologicalBioKAN(nn.Module):
         return h
 
 
-def create_biokan_classifier(in_features, hidden_dim=128, num_classes=10, 
-                          num_blocks=3, attention_type='biological', 
-                          dropout=0.1, neuromodulation=True):
-    """
-    BioKAN分類器を作成するヘルパー関数
+def create_biokan_classifier(in_features: int, hidden_dim: int = 128, num_classes: int = 10, 
+                           num_blocks: int = 3, attention_type: str = 'biological', 
+                           dropout: float = 0.1, neuromodulation: bool = True) -> NeuropharmacologicalBioKAN:
+    """BioKANモデルの分類器を作成
     
     Args:
-        in_features: 入力特徴量の数
+        in_features: 入力特徴量の次元
         hidden_dim: 隠れ層の次元
-        num_classes: 出力クラス数
-        num_blocks: BioKANブロック数
+        num_classes: クラス数
+        num_blocks: ブロック数
         attention_type: アテンションの種類
-            'biological', 'cortical', 'hierarchical'
-        dropout: ドロップアウト確率
-        neuromodulation: 神経調節を有効にするかどうか
+        dropout: ドロップアウト率
+        neuromodulation: 神経調節を使用するかどうか
         
     Returns:
-        BioKANモデルのインスタンス
+        model: BioKANモデル
     """
-    
-    return NeuropharmacologicalBioKAN(
+    model = NeuropharmacologicalBioKAN(
         in_features=in_features,
         hidden_dim=hidden_dim,
         num_classes=num_classes,
         num_blocks=num_blocks,
         attention_type=attention_type,
         dropout=dropout
-    ) 
+    )
+    return model
     
 class PsychedelicAugmentedBioKAN(NeuropharmacologicalBioKAN):
     """
@@ -1808,7 +1832,7 @@ class NeuroTransformerBioKAN(nn.Module):
             return LocalBiologicalAttention(
                 embed_dim=hidden_dim,
                 num_heads=num_heads,
-                dropout=dropout,
+        dropout=dropout,
                 local_context=16,  # 局所コンテキスト窓サイズ
                 neuromodulation=True
             )
@@ -1887,143 +1911,327 @@ class NeuroTransformerBioKAN(nn.Module):
 
 # 不足しているアテンションクラスを実装
 class LocalBiologicalAttention(BiologicalMultiHeadAttention):
-    """局所的受容野を持つ生物学的アテンション"""
+    """
+    局所的な文脈を考慮したバイオロジカルアテンション
+    近傍のトークンとの関係性に注目する
+    """
     
     def __init__(self, embed_dim, num_heads, dropout=0.1, local_context=16, neuromodulation=True):
+        """
+        初期化
+        
+        Args:
+            embed_dim: 埋め込み次元
+            num_heads: ヘッド数
+            dropout: ドロップアウト率
+            local_context: 局所的な文脈のウィンドウサイズ
+            neuromodulation: 神経調節を行うかどうか
+        """
         super().__init__(embed_dim, num_heads, dropout, neuromodulation)
         self.local_context = local_context
-    
+        
     def forward(self, query, key=None, value=None, attn_mask=None, need_weights=False):
-        # 局所的コンテキスト窓の実装
+        """
+        局所的な文脈を考慮した順伝播
+        
+        Args:
+            query: クエリテンソル [batch_size, seq_len, embed_dim]
+            key: キーテンソル（Noneの場合はqueryを使用）
+            value: バリューテンソル（Noneの場合はqueryを使用）
+            attn_mask: アテンションマスク
+            need_weights: アテンション重みを返すかどうか
+            
+        Returns:
+            attn_output: アテンション出力
+            attn_weights: アテンション重み（オプション）
+        """
         if key is None:
             key = query
         if value is None:
             value = query
             
-        # 局所的マスクの作成
-        seq_len = query.size(1)
-        local_mask = torch.ones(seq_len, seq_len, device=query.device)
+        batch_size, seq_len, _ = query.size()
         
+        # 局所的な文脈マスクを作成
+        local_mask = torch.zeros(seq_len, seq_len, device=query.device)
         for i in range(seq_len):
             start = max(0, i - self.local_context // 2)
             end = min(seq_len, i + self.local_context // 2 + 1)
-            local_mask[i, start:end] = 0
-        
+            local_mask[i, start:end] = 1.0
+            
+        # 既存のマスクと組み合わせる
         if attn_mask is not None:
-            attn_mask = attn_mask + local_mask.bool()
-        else:
-            attn_mask = local_mask.bool()
+            local_mask = local_mask * attn_mask
+            
+        # スーパークラスのforwardを呼び出し
+        attn_output, attn_weights = super().forward(
+            query, key, value,
+            attn_mask=local_mask,
+            need_weights=need_weights
+        )
         
-        return super().forward(query, key, value, attn_mask, need_weights)
+        return attn_output, attn_weights
 
 # 残りのアテンションクラスを同様に実装
-class HorizontalIntegrationAttention(nn.Module):
-    """水平結合による特徴統合アテンション
-    
-    参考文献：
-    - Gilbert, C.D., & Wiesel, T.N. (1989). Columnar specificity of intrinsic horizontal and corticocortical connections in cat visual cortex. Journal of Neuroscience, 9(7), 2432-2442.
-    - Stettler, D.D., et al. (2002). Lateral connectivity and contextual interactions in macaque primary visual cortex. Neuron, 36(4), 739-750.
+class HorizontalIntegrationAttention(BiologicalMultiHeadAttention):
+    """
+    水平方向の情報統合を行うバイオロジカルアテンション
+    同じ層内での情報の統合を担当
     """
     
     def __init__(self, embed_dim, num_heads, dropout=0.1, neuromodulation=True):
-        super().__init__()
-        self.mha = BiologicalMultiHeadAttention(embed_dim, num_heads, dropout, neuromodulation)
-        self.lateral_weights = nn.Parameter(torch.randn(embed_dim, embed_dim) * 0.02)
-        self.norm = nn.LayerNorm(embed_dim)
+        """
+        初期化
         
-    def forward(self, query, key=None, value=None, attn_mask=None):
-        # 標準的なアテンション
-        if key is None:
-            key = query
-        if value is None:
-            value = query
-            
-        attn_output, attn_weights = self.mha(query, key, value, attn_mask, True)
-        
-        # 水平方向の結合を追加（V1の水平結合を模倣）
-        batch_size, seq_len, dim = query.size()
-        lateral_connections = torch.matmul(query, self.lateral_weights)
-        
-        # 出力の結合と正規化
-        output = self.norm(attn_output + 0.5 * lateral_connections)
-        
-        return output, attn_weights
-
-class FeedbackAttention(BiologicalMultiHeadAttention):
-    """フィードバックアテンション（高次皮質から低次皮質へのトップダウン信号）
-    
-    参考文献：
-    - Lamme, V.A., & Roelfsema, P.R. (2000). The distinct modes of vision offered by feedforward and recurrent processing. Trends in Neurosciences, 23(11), 571-579.
-    - Gilbert, C.D., & Li, W. (2013). Top-down influences on visual processing. Nature Reviews Neuroscience, 14(5), 350-363.
-    """
-    
-    def __init__(self, embed_dim, num_heads, dropout=0.1, neuromodulation=True):
+        Args:
+            embed_dim: 埋め込み次元
+            num_heads: ヘッド数
+            dropout: ドロップアウト率
+            neuromodulation: 神経調節を行うかどうか
+        """
         super().__init__(embed_dim, num_heads, dropout, neuromodulation)
-        self.feedback_gate = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim),
-            nn.Sigmoid()
-        )
-        self.contextual_modulation = nn.Linear(embed_dim, embed_dim)
+        
+        # 水平方向の結合強度
+        self.horizontal_strength = nn.Parameter(torch.ones(num_heads) * 0.5)
         
     def forward(self, query, key=None, value=None, attn_mask=None, need_weights=False):
+        """
+        水平方向の情報統合を行う順伝播
+        
+        Args:
+            query: クエリテンソル [batch_size, seq_len, embed_dim]
+            key: キーテンソル（Noneの場合はqueryを使用）
+            value: バリューテンソル（Noneの場合はqueryを使用）
+            attn_mask: アテンションマスク
+            need_weights: アテンション重みを返すかどうか
+            
+        Returns:
+            attn_output: アテンション出力
+            attn_weights: アテンション重み（オプション）
+        """
         if key is None:
             key = query
         if value is None:
             value = query
             
-        # 通常のアテンションメカニズム
-        attn_output, attn_weights = super().forward(query, key, value, attn_mask, True)
+        # スーパークラスのforwardを呼び出し
+        attn_output, attn_weights = super().forward(
+            query, key, value,
+            attn_mask=attn_mask,
+            need_weights=True
+        )
         
-        # フィードバックゲーティング（トップダウン信号の選択的調整）
-        gate = self.feedback_gate(attn_output)
-        contextual = self.contextual_modulation(query)
+        if self.neuromodulation:
+            # 水平方向の結合強度を適用
+            batch_size = query.size(0)
+            seq_len = query.size(1)
+            
+            # 結合強度を拡張 [num_heads] -> [batch_size, seq_len, embed_dim]
+            strength = self.horizontal_strength.view(1, 1, -1).expand_as(attn_output)
+            
+            # 水平方向の結合を適用
+            attn_output = attn_output * strength
+            
+            # 神経伝達物質の影響を考慮
+            if self.neuromodulator is not None:
+                # GABAの抑制効果を取得
+                neuromod_effect = self.neuromodulator.get_state()
+                gaba = neuromod_effect.get('gaba', 1.0)
+                
+                # 抑制性の調節を適用
+                if gaba > 1.2:
+                    attn_output = attn_output * 0.8
         
-        # トップダウン信号による修飾（高次特徴が低次処理を調整）
-        modulated_output = attn_output * gate + contextual * (1 - gate)
-        
-        if need_weights:
-            return modulated_output, attn_weights
-        return modulated_output
+        return attn_output, attn_weights if need_weights else None
 
-class ThalamicAttention(BiologicalMultiHeadAttention):
-    """視床様ゲーティングアテンション
-    
-    参考文献：
-    - Sherman, S.M. (2016). Thalamus plays a central role in ongoing cortical functioning. Nature Neuroscience, 19(4), 533-541.
-    - Halassa, M.M., & Kastner, S. (2017). Thalamic functions in distributed cognitive control. Nature Neuroscience, 20(12), 1669-1679.
+class FeedbackAttention(BiologicalMultiHeadAttention):
+    """
+    上位層からの情報のフィードバックを行うバイオロジカルアテンション
+    予測的符号化と階層的情報処理を実現
     """
     
     def __init__(self, embed_dim, num_heads, dropout=0.1, neuromodulation=True):
+        """
+        初期化
+        
+        Args:
+            embed_dim: 埋め込み次元
+            num_heads: ヘッド数
+            dropout: ドロップアウト率
+            neuromodulation: 神経調節を行うかどうか
+        """
         super().__init__(embed_dim, num_heads, dropout, neuromodulation)
-        # 視床網様核のゲーティング機構を模倣
-        self.thalamic_gate = nn.Sequential(
+        
+        # フィードバック強度の学習可能なパラメータ
+        self.feedback_strength = nn.Parameter(torch.ones(num_heads) * 0.3)
+        
+        # 予測誤差の計算用の線形層
+        self.error_projection = nn.Linear(embed_dim, embed_dim)
+        
+    def forward(self, query, key=None, value=None, attn_mask=None, need_weights=False):
+        """
+        フィードバック情報を考慮した順伝播
+        
+        Args:
+            query: クエリテンソル [batch_size, seq_len, embed_dim]
+            key: キーテンソル（Noneの場合はqueryを使用）
+            value: バリューテンソル（Noneの場合はqueryを使用）
+            attn_mask: アテンションマスク
+            need_weights: アテンション重みを返すかどうか
+            
+        Returns:
+            attn_output: アテンション出力
+            attn_weights: アテンション重み（オプション）
+        """
+        if key is None:
+            key = query
+        if value is None:
+            value = query
+            
+        # スーパークラスのforwardを呼び出し
+        attn_output, attn_weights = super().forward(
+            query, key, value,
+            attn_mask=attn_mask,
+            need_weights=True
+        )
+        
+        if self.neuromodulation:
+            # 予測誤差の計算
+            predicted = self.error_projection(attn_output)
+            prediction_error = torch.abs(predicted - query)
+            
+            # フィードバック強度を適用
+            batch_size = query.size(0)
+            seq_len = query.size(1)
+            
+            # フィードバック強度を拡張 [num_heads] -> [batch_size, seq_len, embed_dim]
+            strength = self.feedback_strength.view(1, 1, -1).expand_as(attn_output)
+            
+            # 予測誤差に基づくフィードバック
+            feedback = attn_output * (1.0 - prediction_error * strength)
+            
+            # 神経伝達物質の影響を考慮
+            if self.neuromodulator is not None:
+                # アセチルコリンとノルアドレナリンの効果を取得
+                neuromod_effect = self.neuromodulator.get_state()
+                acetylcholine = neuromod_effect.get('acetylcholine', 1.0)
+                noradrenaline = neuromod_effect.get('noradrenaline', 1.0)
+                
+                # 注意と覚醒の調整
+                if acetylcholine > 1.2:
+                    # アセチルコリン高：フィードバック信号を強化
+                    feedback = feedback * 1.2
+                
+                if noradrenaline > 1.2:
+                    # ノルアドレナリン高：信号対雑音比を向上
+                    feedback = torch.where(
+                        prediction_error < 0.3,
+                        feedback * 1.2,
+                        feedback * 0.8
+                    )
+            
+            # フィードバック信号を出力に適用
+            attn_output = feedback
+        
+        return attn_output, attn_weights if need_weights else None
+
+class ThalamicAttention(BiologicalMultiHeadAttention):
+    """
+    視床様のゲーティング機構を持つバイオロジカルアテンション
+    情報の選択的な伝達と注意の制御を実現
+    """
+    
+    def __init__(self, embed_dim, num_heads, dropout=0.1, neuromodulation=True):
+        """
+        初期化
+        
+        Args:
+            embed_dim: 埋め込み次元
+            num_heads: ヘッド数
+            dropout: ドロップアウト率
+            neuromodulation: 神経調節を行うかどうか
+        """
+        super().__init__(embed_dim, num_heads, dropout, neuromodulation)
+        
+        # ゲーティング機構
+        self.gate = nn.Sequential(
             nn.Linear(embed_dim, embed_dim // 2),
             nn.ReLU(),
             nn.Linear(embed_dim // 2, embed_dim),
             nn.Sigmoid()
         )
-        self.arousal_modulation = nn.Parameter(torch.ones(1))
+        
+        # 状態監視
+        self.state_monitor = nn.Linear(embed_dim, 1)
         
     def forward(self, query, key=None, value=None, attn_mask=None, need_weights=False):
+        """
+        視床様のゲーティングを適用した順伝播
+        
+        Args:
+            query: クエリテンソル [batch_size, seq_len, embed_dim]
+            key: キーテンソル（Noneの場合はqueryを使用）
+            value: バリューテンソル（Noneの場合はqueryを使用）
+            attn_mask: アテンションマスク
+            need_weights: アテンション重みを返すかどうか
+            
+        Returns:
+            attn_output: アテンション出力
+            attn_weights: アテンション重み（オプション）
+        """
         if key is None:
             key = query
         if value is None:
             value = query
             
-        # 入力の情報状態に基づくゲーティング（選択的注意）
-        gate = self.thalamic_gate(query)
-        gate = gate * self.arousal_modulation  # 覚醒状態による調整
+        # スーパークラスのforwardを呼び出し
+        attn_output, attn_weights = super().forward(
+            query, key, value,
+            attn_mask=attn_mask,
+            need_weights=True
+        )
         
-        # ゲーティングされた入力で注意メカニズムを適用
-        gated_query = query * gate
+        if self.neuromodulation:
+            # 状態の監視（覚醒レベルの推定）
+            arousal = torch.sigmoid(self.state_monitor(attn_output)).mean()
+            
+            # ゲーティング信号の生成
+            gate_signal = self.gate(attn_output)
+            
+            # ゲーティングの適用
+            gated_output = attn_output * gate_signal
+            
+            # 神経伝達物質の影響を考慮
+            if self.neuromodulator is not None:
+                # セロトニンとドーパミンの効果を取得
+                neuromod_effect = self.neuromodulator.get_state()
+                serotonin = neuromod_effect.get('serotonin', 1.0)
+                dopamine = neuromod_effect.get('dopamine', 1.0)
+                
+                # 覚醒レベルに基づく調整
+                if arousal > 0.8:
+                    # 高覚醒時：選択性を向上
+                    gate_signal = gate_signal * 1.2
+                elif arousal < 0.3:
+                    # 低覚醒時：全体的な抑制
+                    gate_signal = gate_signal * 0.8
+                
+                # 報酬系の影響
+                if dopamine > 1.2:
+                    # 報酬関連の信号を強化
+                    positive_signals = torch.relu(gated_output)
+                    gated_output = gated_output + 0.2 * positive_signals
+                
+                # 感情状態の影響
+                if serotonin > 1.2:
+                    # セロトニン高：安定した情報処理
+                    gated_output = torch.tanh(gated_output)
+            
+            # ゲーティングされた出力を返す
+            attn_output = gated_output
         
-        # 通常のアテンションメカニズム
-        attn_output, attn_weights = super().forward(gated_query, key, value, attn_mask, True)
-        
-        if need_weights:
-            return attn_output, attn_weights
-        return attn_output
-    
+        return attn_output, attn_weights if need_weights else None
+
 class NeoCortexBioKAN(NeuroTransformerBioKAN):
     """
     人間の大脳新皮質の機能をより忠実に模倣したBioKANモデル
@@ -2608,4 +2816,31 @@ class HigherCognitionModule(nn.Module):
         output = x + 0.15 * abstract + 0.15 * analog + 0.1 * causal + 0.1 * meta + 0.1 * creative
         
         return output
+    
+    def _update_neuromodulators(self, layer_activities):
+        """神経伝達物質の状態を更新
+        
+        Args:
+            layer_activities: 各層の活性化状態
+        """
+        # 活性化レベルの計算
+        average_activation = layer_activities[-1].mean().item()
+        max_activation = layer_activities[-1].max().item()
+        attention_level = self.attention_weights.mean().item() if hasattr(self, 'attention_weights') else 0.5
+        arousal_level = max(0.2, min(0.8, average_activation))
+        stability_level = 1.0 - torch.var(layer_activities[-1]).item()
+        
+        # 神経伝達物質への刺激を設定
+        stimuli = {
+            'glutamate': average_activation * 0.8,
+            'gaba': (1.0 - average_activation) * 0.6,
+            'dopamine': max_activation * 0.6 - 0.2,
+            'acetylcholine': attention_level * 0.7,
+            'noradrenaline': arousal_level * 0.8,
+            'serotonin': stability_level * 0.5
+        }
+        
+        # 神経伝達物質の状態を更新
+        if self.neuromodulator is not None:
+            self.neuromodulator.update(stimuli)
     

@@ -1,17 +1,22 @@
 """
-BioKANパッケージ初期化
+BioKAN: バイオロジカル知識獲得ネットワーク
+生物学的神経系の特性を取り入れた深層学習モデル
 """
 
 from biokan.core import (
-    NeoCortexBioKAN,
-    NeuropharmacologicalBioKAN,
-    PsychedelicAugmentedBioKAN,
-    create_biokan_classifier
+    BioKANBlock,
+    create_biokan_classifier,
+    BiologicalMultiHeadAttention,
+    HierarchicalMultiScaleAttention,
+    CorticalAttention,
+    NeuropharmacologicalBioKAN
 )
 
 __all__ = [
-    'NeoCortexBioKAN',
-    'NeuropharmacologicalBioKAN',
-    'PsychedelicAugmentedBioKAN',
-    'create_biokan_classifier'
+    'BioKANBlock',
+    'create_biokan_classifier',
+    'BiologicalMultiHeadAttention',
+    'HierarchicalMultiScaleAttention',
+    'CorticalAttention',
+    'NeuropharmacologicalBioKAN'
 ] 

@@ -3,7 +3,7 @@ BioKAN コアモジュール
 モデルのアーキテクチャと基本コンポーネントを提供
 """
 
-from biokan.core.biokan_model import BioKANModel, BioKANBlock, create_biokan_classifier
+from biokan.core.biokan_model import BioKANBlock, create_biokan_classifier, NeuropharmacologicalBioKAN
 from biokan.core.attention import (
     BiologicalMultiHeadAttention,
     HierarchicalMultiScaleAttention,
@@ -11,9 +11,9 @@ from biokan.core.attention import (
 )
 
 __all__ = [
-    'BioKANModel',
     'BioKANBlock',
     'create_biokan_classifier',
+    'NeuropharmacologicalBioKAN',
     'BiologicalMultiHeadAttention',
     'HierarchicalMultiScaleAttention',
     'CorticalAttention'
