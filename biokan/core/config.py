@@ -5,6 +5,7 @@ BioKANモデルの設定クラス
 from dataclasses import dataclass, field
 from typing import List, Dict
 from typing import Optional
+import torch
 
 
 def default_baseline_levels() -> List[float]:
@@ -53,35 +54,37 @@ class AttentionConfig:
 
 @dataclass
 class BioKANConfig:
-    """BioKANモデルの設定を保持するデータクラス"""
+    """BioKANモデルの設定を保持するクラス"""
     
-    # モデル構造
-    hidden_dim: int = 128
+    # モデルのアーキテクチャ
+    input_dim: int = 784  # MNIST用
+    hidden_dim: int = 512
+    output_dim: int = 10  # MNIST用
     num_layers: int = 6
     num_heads: int = 8
     dropout: float = 0.1
-    
-    # 学習設定
-    learning_rate: float = 0.001
-    batch_size: int = 32
-    num_epochs: int = 100
-    weight_decay: float = 1e-5
-    
-    # 神経伝達物質設定
-    neurotransmitter: NeurotransmitterConfig = field(
-        default_factory=lambda: NeurotransmitterConfig()
-    )
-    
-    # アテンション設定
     attention_type: str = "biological"
-    attention_dropout: float = 0.1
+    use_neuromodulation: bool = True
+    use_batch_norm: bool = True  # バッチ正規化の使用
     
-    # 転移学習設定
-    transfer_learning: bool = False
-    source_model_path: Optional[str] = None
-    freeze_layers: int = 0
+    # 訓練パラメータ
+    batch_size: int = 128
+    learning_rate: float = 2e-4
+    weight_decay: float = 0.01
+    num_epochs: int = 50
+    
+    # その他の設定
+    device: str = "cuda"
     
     def __post_init__(self):
+        """初期化後の処理
+        hidden_dimがnum_headsで割り切れるように調整
+        """
+        if self.hidden_dim % self.num_heads != 0:
+            self.hidden_dim = ((self.hidden_dim + self.num_heads - 1) 
+                             // self.num_heads) * self.num_heads
+            print(f"hidden_dimを{self.hidden_dim}に調整しました（num_headsで割り切れるように）")
+        
         """設定値の検証"""
         if self.hidden_dim <= 0:
             raise ValueError("hidden_dimは正の整数である必要があります")
@@ -101,36 +104,27 @@ class BioKANConfig:
         if self.num_epochs <= 0:
             raise ValueError("num_epochsは正の整数である必要があります")
         
-        if not 0 <= self.weight_decay:
-            raise ValueError("weight_decayは0以上である必要があります")
-        
         valid_attention_types = ["biological", "cortical", "hierarchical"]
         if self.attention_type not in valid_attention_types:
             raise ValueError(
                 f"attention_typeは{valid_attention_types}のいずれかである必要があります"
             )
-        
-        if not 0 <= self.attention_dropout <= 1:
-            raise ValueError("attention_dropoutは0から1の間である必要があります")
-        
-        if self.freeze_layers < 0:
-            raise ValueError("freeze_layersは0以上である必要があります")
 
     def to_dict(self) -> Dict:
         """設定をディクショナリ形式で返す"""
         return {
+            'input_dim': self.input_dim,
             'hidden_dim': self.hidden_dim,
+            'output_dim': self.output_dim,
             'num_layers': self.num_layers,
             'num_heads': self.num_heads,
             'dropout': self.dropout,
             'learning_rate': self.learning_rate,
-            'neurotransmitter': self.neurotransmitter.__dict__,
-            'attention_type': self.attention_type,
-            'attention_dropout': self.attention_dropout,
             'batch_size': self.batch_size,
             'num_epochs': self.num_epochs,
+            'device': self.device,
+            'use_neuromodulation': self.use_neuromodulation,
+            'attention_type': self.attention_type,
             'weight_decay': self.weight_decay,
-            'transfer_learning': self.transfer_learning,
-            'source_model_path': self.source_model_path,
-            'freeze_layers': self.freeze_layers
+            'use_batch_norm': self.use_batch_norm
         } 

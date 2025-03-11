@@ -15,7 +15,7 @@ from biokan.neuro.neuromodulators import NeuromodulatorSystem
 from biokan.neuro.glial_cells import Astrocyte, Microglia
 
 
-class BiologicalMultiHeadAttention(MultiHeadAttention):
+class BiologicalMultiHeadAttention(nn.Module):
     """
     生物学的な特性を持つマルチヘッドアテンション
     アストロサイトの調節効果と神経伝達物質の影響を取り入れる
@@ -30,69 +30,87 @@ class BiologicalMultiHeadAttention(MultiHeadAttention):
             dropout (float, optional): ドロップアウト率。デフォルトは0.0。
             use_neuromodulation (bool, optional): 神経調節を使用するかどうか。デフォルトはTrue。
         """
-        super().__init__(embed_dim, num_heads, dropout)
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.dropout = dropout
         self.use_neuromodulation = use_neuromodulation
         
+        # 注意機構の重みを初期化
+        self.head_dim = embed_dim // num_heads
+        self.scale = self.head_dim ** -0.5
+        
+        self.q_proj = nn.Linear(embed_dim, embed_dim)
+        self.k_proj = nn.Linear(embed_dim, embed_dim)
+        self.v_proj = nn.Linear(embed_dim, embed_dim)
+        self.out_proj = nn.Linear(embed_dim, embed_dim)
+        
+        self.dropout_layer = nn.Dropout(dropout)
+        
+        # 神経調節用のパラメータ
         if use_neuromodulation:
             self.neuromodulation = NeuromodulationSystem(embed_dim)
-        
-        # 神経調節システム（オプション）
-        self.neuromodulator = None
-        if use_neuromodulation:
-            from biokan.neuro import NeuromodulatorSystem
-            self.neuromodulator = NeuromodulatorSystem()
-        
-        # アストロサイトの初期化
-            self.astrocyte = None
-        if use_neuromodulation:
-            self.astrocyte = EnhancedAstrocyte(
-                region_shape=(num_heads, embed_dim // num_heads),
-                activation_threshold=0.7,
-                decay_rate=0.05,
-                diffusion_rate=0.1
-            )
-        
-        # ヘッドごとの活性化閾値
-        self.head_thresholds = nn.Parameter(torch.ones(num_heads) * 0.1)
-        
-        # アテンション重みのキャッシュ（説明可能性のため）
-        self.attention_weights = None
-    
-    def forward(self, query, key, value, attn_mask=None, need_weights=False):
-        """順伝播
+            self.attention_scale = nn.Parameter(torch.ones(1))
+            self.attention_bias = nn.Parameter(torch.zeros(1))
 
-        Args:
-            query (torch.Tensor): クエリテンソル [batch_size x hidden_dim]
-            key (torch.Tensor): キーテンソル [batch_size x hidden_dim]
-            value (torch.Tensor): バリューテンソル [batch_size x hidden_dim]
-            attn_mask (torch.Tensor, optional): アテンションマスク
-            need_weights (bool, optional): アテンションの重みを返すかどうか
-
-        Returns:
-            torch.Tensor: 出力テンソル [batch_size x hidden_dim]
-            torch.Tensor: アテンションの重み（need_weights=Trueの場合）
-        """
-        # 入力テンソルの形状を変更 [batch_size x hidden_dim] -> [1 x batch_size x hidden_dim]
-        if query.dim() == 2:
-            query = query.unsqueeze(0)
-        if key.dim() == 2:
-            key = key.unsqueeze(0)
-        if value.dim() == 2:
-            value = value.unsqueeze(0)
+    def forward(self, query, key=None, value=None, attn_mask=None, need_weights=False):
+        if key is None:
+            key = query
+        if value is None:
+            value = query
+            
+        batch_size = query.size(0)
+        seq_len = query.size(1) if len(query.size()) > 2 else 1
         
-        # マルチヘッドアテンションの適用
-        attn_output, attn_weights = super().forward(
-            query, key, value,
-            attn_mask=attn_mask,
-            need_weights=need_weights
-        )
+        # シーケンス長が1の場合、次元を追加
+        if len(query.size()) == 2:
+            query = query.unsqueeze(1)
+            key = key.unsqueeze(1)
+            value = value.unsqueeze(1)
         
-        # 出力テンソルの形状を戻す [1 x batch_size x hidden_dim] -> [batch_size x hidden_dim]
-        attn_output = attn_output.squeeze(0)
+        # 線形変換
+        q = self.q_proj(query)  # [batch_size, seq_len, embed_dim]
+        k = self.k_proj(key)    # [batch_size, seq_len, embed_dim]
+        v = self.v_proj(value)  # [batch_size, seq_len, embed_dim]
+        
+        # ヘッドごとに分割
+        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        
+        # スケーリングされた内積注意
+        attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        
+        if attn_mask is not None:
+            attn_weights = attn_weights.masked_fill(attn_mask == 0, float('-inf'))
+        
+        attn_weights = F.softmax(attn_weights, dim=-1)
+        attn_weights = self.dropout_layer(attn_weights)
+        
+        # 値との積
+        attn = torch.matmul(attn_weights, v)  # [batch_size, num_heads, seq_len, head_dim]
+        
+        # 神経調節の適用
+        if self.use_neuromodulation:
+            neuromod = self.neuromodulation(query.view(batch_size * seq_len, -1))  # [batch_size * seq_len, embed_dim]
+            neuromod = neuromod.view(batch_size, seq_len, -1)  # [batch_size, seq_len, embed_dim]
+            neuromod = neuromod.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+            attn = attn * self.attention_scale + self.attention_bias
+            attn = attn * (1 + neuromod)
+        
+        # 形状の復元
+        attn = attn.transpose(1, 2).contiguous().view(batch_size, seq_len, self.embed_dim)
+        
+        # 出力の線形変換
+        output = self.out_proj(attn)
+        
+        # シーケンス長が1の場合、次元を削除
+        if seq_len == 1:
+            output = output.squeeze(1)
         
         if need_weights:
-            return attn_output, attn_weights
-        return attn_output
+            return output, attn_weights
+        return output
 
 
 class BioKANBlock(nn.Module):
@@ -103,9 +121,10 @@ class BioKANBlock(nn.Module):
         hidden_dim,
         num_heads=4,
         dropout=0.1,
-        attention_type="dot",
+        attention_type="biological",
         device="cuda",
-        use_neuromodulation=True
+        use_neuromodulation=True,
+        use_batch_norm=True
     ):
         """BioKANブロックの初期化
 
@@ -113,11 +132,15 @@ class BioKANBlock(nn.Module):
             hidden_dim (int): 隠れ層の次元数
             num_heads (int, optional): アテンションヘッドの数。デフォルトは4。
             dropout (float, optional): ドロップアウト率。デフォルトは0.1。
-            attention_type (str, optional): アテンションのタイプ。デフォルトは"dot"。
+            attention_type (str, optional): アテンションのタイプ。デフォルトは"biological"。
             device (str, optional): 使用するデバイス。デフォルトは"cuda"。
             use_neuromodulation (bool, optional): 神経調節を使用するかどうか。デフォルトはTrue。
+            use_batch_norm (bool, optional): バッチ正規化を使用するかどうか。デフォルトはTrue。
         """
         super().__init__()
+        
+        self.device = device
+        self.use_batch_norm = use_batch_norm
         
         # hidden_dimをnum_headsで割り切れるように調整
         self.hidden_dim = ((hidden_dim + num_heads - 1) // num_heads) * num_heads
@@ -142,6 +165,11 @@ class BioKANBlock(nn.Module):
         else:
             self.output_projection = nn.Identity()
         
+        # バッチ正規化
+        if use_batch_norm:
+            self.input_norm = nn.BatchNorm1d(self.hidden_dim)
+            self.attention_norm = nn.BatchNorm1d(self.hidden_dim)
+        
         # その他のレイヤー
         self.layer_norm = nn.LayerNorm(self.hidden_dim)
         self.dropout = nn.Dropout(dropout)
@@ -149,7 +177,10 @@ class BioKANBlock(nn.Module):
         # 神経調節システム
         self.use_neuromodulation = use_neuromodulation
         if use_neuromodulation:
-            self.neuromodulation = NeuromodulationSystem(self.hidden_dim)
+            self.neuromodulation = NeuromodulationSystem(self.hidden_dim, device=device)
+        
+        # デバイスに移動
+        self.to(device)
     
     def forward(self, x):
         """順伝播処理
@@ -163,11 +194,29 @@ class BioKANBlock(nn.Module):
         # 入力の変換（必要な場合）
         h = self.input_projection(x)
         
+        # バッチ正規化（使用する場合）
+        if self.use_batch_norm:
+            if len(h.shape) == 2:
+                h = self.input_norm(h)
+            else:
+                h = h.transpose(1, 2)
+                h = self.input_norm(h)
+                h = h.transpose(1, 2)
+        
         # レイヤー正規化
         h = self.layer_norm(h)
         
         # セルフアテンションの適用
-        h = self.feature_attention(h, h, h)
+        h = self.feature_attention(h)
+        
+        # バッチ正規化（使用する場合）
+        if self.use_batch_norm:
+            if len(h.shape) == 2:
+                h = self.attention_norm(h)
+            else:
+                h = h.transpose(1, 2)
+                h = self.attention_norm(h)
+                h = h.transpose(1, 2)
         
         # ドロップアウト
         h = self.dropout(h)
@@ -913,62 +962,40 @@ class NeuroplasticityModule(nn.Module):
 
 
 class NeuropharmacologicalBioKAN(nn.Module):
-    """
-    薬理学的効果をシミュレート可能なBioKANモデル
-    各種引用文献に基づく実装
-    """
-    
     def __init__(
         self,
-        input_dim=1024,
-        hidden_dim=512,      # RTX 3080向けに調整
-        output_dim=8,
-        num_blocks=3,        # メモリ使用量を抑える
+        input_dim=784,          # MNIST入力
+        hidden_dim=512,         # より大きな表現力
+        output_dim=10,          # MNISTクラス数
+        num_blocks=6,           # より深いネットワーク
         num_heads=8,
         dropout=0.1,
-        attention_type="dot" # 計算効率の良いドット積アテンション
+        attention_type="dot",   # 基本的な注意機構
+        use_neuromodulation=False,  # 神経調節を無効化
+        device="cuda"
     ):
-        """NeuropharmacologicalBioKANモデルの初期化
-
-        Args:
-            input_dim (int): 入力次元数
-            hidden_dim (int): 隠れ層の次元数
-            output_dim (int): 出力次元数
-            num_blocks (int, optional): BioKANブロックの数。デフォルトは3。
-            num_heads (int, optional): アテンションヘッドの数。デフォルトは4。
-            dropout (float, optional): ドロップアウト率。デフォルトは0.1。
-            attention_type (str, optional): アテンションのタイプ。デフォルトは"dot"。
-            device (str, optional): 使用するデバイス。デフォルトは"cuda"。
-            history_max_length (int, optional): 履歴の最大長。デフォルトは100。
-        """
         super().__init__()
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
-        self.num_blocks = num_blocks
-        self.device = "cuda"
-        self.history_max_length = 100
         
-        # 皮質活動履歴の初期化
-        self.cortical_activity_history = [[] for _ in range(num_blocks)]
-        
-        # 皮質層間の結合を初期化
-        self.cortical_layer_connections = nn.Parameter(
-            torch.randn(num_blocks, num_blocks, device=self.device) / math.sqrt(num_blocks)
-        )
+        self.device = device
         
         # 入力変換層
-        self.input_transform = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-        )
+        self.input_transform = nn.Linear(input_dim, hidden_dim)
         
-        # アテンションレイヤー
-        self.attention = BiologicalMultiHeadAttention(
-            embed_dim=hidden_dim,
-            num_heads=num_heads,
-            dropout=dropout
-        )
+        # 注意機構
+        if attention_type == "biological":
+            self.attention = BiologicalMultiHeadAttention(
+                embed_dim=hidden_dim,
+                num_heads=num_heads,
+                dropout=dropout,
+                use_neuromodulation=use_neuromodulation
+            )
+        else:
+            self.attention = nn.MultiheadAttention(
+                embed_dim=hidden_dim,
+                num_heads=num_heads,
+                dropout=dropout,
+                batch_first=True
+            )
         
         # BioKANブロック
         self.blocks = nn.ModuleList([
@@ -977,280 +1004,31 @@ class NeuropharmacologicalBioKAN(nn.Module):
                 num_heads=num_heads,
                 dropout=dropout,
                 attention_type=attention_type,
-                device=self.device
-            )
-            for _ in range(num_blocks)
+                use_neuromodulation=use_neuromodulation,
+                device=device
+            ) for _ in range(num_blocks)
         ])
         
         # 出力層
-        self.output = nn.Linear(hidden_dim, output_dim)
+        self.output_transform = nn.Linear(hidden_dim, output_dim)
+        self.dropout = nn.Dropout(dropout)
         
-        # 神経伝達物質シグナリング
-        self.neurotransmitter_signaling = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Sigmoid()
-        )
-        
-        # 神経伝達物質システム
-        self.neuromodulator = AdvancedNeuromodulatorSystem()
-        
-        # 神経可塑性モジュール
-        self.plasticity = NeuroplasticityModule(hidden_dim)
-        
-        # 薬物効果の状態
-        self.active_drugs = {}
-        
-        # モニタリング用の状態
-        self.layer_activities = []
-        self.attention_weights = None
-    
-    def apply_drug(self, drug_name, dose=1.0, duration=20.0):
-        """
-        モデルに薬物を適用し、その効果をシミュレート
-        """
-        success = self.neuromodulator.apply_drug(drug_name, dose, duration)
-        
-        if success:
-            self.drug_monitoring['applied_drugs'].append({
-                'drug': drug_name,
-                'dose': dose,
-                'time_applied': len(self.drug_monitoring['nt_history']),
-                'duration': duration
-            })
-            
-            # 薬物の特性に基づいてアストロサイトにも効果を適用
-            drug_effects = {}
-            
-            # 薬物タイプと効果のマッピング
-            if drug_name in ['haloperidol', 'clozapine', 'risperidone']:
-                drug_effects['antipsychotic'] = dose
-            elif drug_name in ['fluoxetine', 'venlafaxine', 'sertraline']:
-                drug_effects['antidepressant'] = dose
-                drug_effects['serotonergic'] = True
-                drug_effects['treatment_duration'] = 1  # 初期値は急性効果
-            elif drug_name in ['diazepam', 'alprazolam']:
-                drug_effects['anxiolytic'] = dose
-            elif drug_name in ['donepezil', 'modafinil']:
-                drug_effects['cognitive_enhancer'] = dose
-                if drug_name == 'donepezil':
-                    drug_effects['cholinergic'] = True
-            
-            # アストロサイトに薬物効果を適用
-            for astrocyte in self.astrocytes:
-                astrocyte._apply_drug_effects(drug_effects)
-            
-            # 神経可塑性効果を適用
-            self.plasticity.apply_psychedelic_effects(drug_name, dose)
-        
-        return success
-    
-    def set_chronic_treatment(self, duration_days):
-        """
-        慢性投与効果をシミュレート（Duman & Monteggia, 2006）
-        """
-        for drug_data in self.drug_monitoring['applied_drugs']:
-            if drug_data['drug'] in ['fluoxetine', 'venlafaxine', 'sertraline']:
-                # アストロサイトへの慢性効果を適用
-                drug_effects = {
-                    'antidepressant': drug_data['dose'],
-                    'serotonergic': True,
-                    'treatment_duration': duration_days
-                }
-                
-                # BDNF増加（神経可塑性への効果）
-                for astrocyte in self.astrocytes:
-                    astrocyte._apply_drug_effects(drug_effects)
-    
+        # デバイスに移動
+        self.to(device)
+
     def forward(self, x):
-        """順伝播
-
-        Args:
-            x (torch.Tensor): 入力テンソル [batch_size x input_dim]
-
-        Returns:
-            torch.Tensor: 出力テンソル [batch_size x output_dim]
-        """
-        # 入力変換
+        # 入力の変換 [batch_size, input_dim] -> [batch_size, hidden_dim]
         h = self.input_transform(x)
-        
-        # アテンションの適用
-        h_expanded = h.unsqueeze(0)  # [1 x batch_size x hidden_dim]
-        h = self.attention(h_expanded, h_expanded, h_expanded)  # [batch_size x hidden_dim]
+        h = F.relu(h)
+        h = self.dropout(h)
         
         # BioKANブロックを通す
-        block_outputs = []
         for block in self.blocks:
             h = block(h)
-            block_outputs.append(h)
-        
-        # 皮質層の活動を生成
-        layer_activities = self._create_cortical_layers(block_outputs)
-        
-        # 皮質層のダイナミクスを処理
-        h = self._process_cortical_layer_dynamics(layer_activities)
-        
-        # 神経伝達物質の効果を適用
-        h = self._apply_neuromodulatory_effects(h)
         
         # 出力層
-        output = self.output(h)
-        
+        output = self.output_transform(h)
         return output
-    
-    def _create_cortical_layers(self, block_outputs):
-        """皮質層の活動を生成
-
-        Args:
-            block_outputs (List[torch.Tensor]): BioKANブロックの出力リスト
-
-        Returns:
-            List[torch.Tensor]: 皮質層の活動リスト
-        """
-        # 皮質層の活動を初期化
-        layer_activities = []
-        
-        # 各ブロックの出力を皮質層の活動として使用
-        for output in block_outputs:
-            layer_activities.append(output)
-        
-        # 皮質活動履歴の長さを調整（必要な場合）
-        if len(self.cortical_activity_history) != len(layer_activities):
-            self.cortical_activity_history = [[] for _ in range(len(layer_activities))]
-        
-        return layer_activities
-    
-    def _update_astrocytes(self, layer_activities):
-        """
-        アストロサイト層の更新と効果取得
-        Cornell-Bell et al. (1990)とVerkhratsky & Nedergaard (2018)の研究に基づく
-        """
-        astro_effects = []
-        
-        for i, (activity, astrocyte) in enumerate(zip(layer_activities, self.astrocytes)):
-            # バッチの最初のサンプルでアストロサイトを更新
-            activity_sample = activity[0].detach().cpu().numpy()
-            
-            # 活動を2D形状にリシェイプ
-            activity_reshaped = activity_sample.reshape(astrocyte.region_shape)
-            
-            # 層インデックスとともに更新
-            astrocyte.update(activity_reshaped, layer_index=i)
-            
-            # 調節効果を取得
-            modulatory_effect = astrocyte.get_modulatory_effect()
-            astro_effects.append(modulatory_effect)
-        
-        return astro_effects
-    
-    def _apply_glial_modulation(self, layer_activities, astro_effects):
-        """グリア細胞による調節を適用する
-
-        Args:
-            layer_activities: 層の活動状態のリスト
-            astro_effects: アストロサイトの効果のリスト
-
-        Returns:
-            List[torch.Tensor]: 調節された活動状態のリスト
-        """
-        modulated_activities = []
-
-        for i, (activity, effect) in enumerate(zip(layer_activities, astro_effects)):
-            # アストロサイトの変調効果をテンソルに変換
-            synapse_mod = effect['synapse_modulation']
-            
-            # 効果のサイズを活動テンソルに合わせる
-            if synapse_mod.shape != activity.shape:
-                # 2D形状から1Dに変換
-                synapse_mod = synapse_mod.view(-1)
-                # サイズ調整（必要な場合は線形補間）
-                if synapse_mod.size(0) != activity.size(-1):
-                    synapse_mod = F.interpolate(
-                        synapse_mod.unsqueeze(0).unsqueeze(0),
-                        size=activity.size(-1),
-                        mode='linear',
-                        align_corners=False
-                    ).squeeze()
-                # バッチサイズに合わせて拡張
-                synapse_mod = synapse_mod.expand(activity.size())
-            
-            # 変調効果を適用（-1から1の範囲で調節）
-            modulated = activity * (1.0 + synapse_mod * 0.3)
-            modulated_activities.append(modulated)
-
-        return modulated_activities
-    
-    def _process_cortical_layer_dynamics(self, layer_activities):
-        """皮質層間のダイナミクスを処理
-
-        Args:
-            layer_activities (List[torch.Tensor]): 各皮質層の活動のリスト
-
-        Returns:
-            torch.Tensor: 統合された活動
-        """
-        batch_size = layer_activities[0].shape[0]
-        hidden_dim = layer_activities[0].shape[1]
-        num_layers = len(layer_activities)
-
-        # 各層の活動を履歴に追加
-        for i, activity in enumerate(layer_activities):
-            # 活動の要約統計量を計算（次元削減）
-            activity_summary = activity.mean(dim=0).unsqueeze(0)  # [1 x hidden_dim]
-
-            # 履歴に追加
-            self.cortical_activity_history[i].append(activity_summary)
-
-            # 履歴の長さを制限
-            if len(self.cortical_activity_history[i]) > self.history_max_length:
-                self.cortical_activity_history[i].pop(0)
-
-        # 層間の結合を正規化
-        norm_connections = torch.sigmoid(self.cortical_layer_connections)
-
-        # 最終的な活動を計算（重み付き平均）
-        integrated_activity = torch.zeros_like(layer_activities[0])
-        for i in range(num_layers):
-            # 他の層からの影響を計算
-            layer_influence = torch.zeros_like(layer_activities[i])
-            for j in range(num_layers):
-                if i != j:
-                    layer_influence += layer_activities[j] * norm_connections[i, j]
-            
-            # 自身の活動と他の層からの影響を組み合わせる
-            integrated_activity += layer_activities[i] + 0.1 * layer_influence
-
-        # 活動を正規化
-        integrated_activity = integrated_activity / num_layers
-
-        return integrated_activity
-    
-    def _update_monitoring(self):
-        """モニタリング情報の更新"""
-        # 活性化レベルの計算
-        average_activation = self.layer_activities[-1].mean().item()
-        max_activation = self.layer_activities[-1].max().item()
-        attention_level = self.attention_weights.mean().item() if hasattr(self, 'attention_weights') else 0.5
-        arousal_level = max(0.2, min(0.8, average_activation))
-        stability_level = 1.0 - torch.var(self.layer_activities[-1]).item()
-        
-        # 神経伝達物質への刺激を設定
-        stimuli = {
-            'glutamate': average_activation * 0.8,
-            'gaba': (1.0 - average_activation) * 0.6,
-            'dopamine': max_activation * 0.6 - 0.2,
-            'acetylcholine': attention_level * 0.7,
-            'noradrenaline': arousal_level * 0.8,
-            'serotonin': stability_level * 0.5
-        }
-        
-        return stimuli
-    
-    def _apply_neuromodulatory_effects(self, h):
-        """
-        神経伝達物質の効果を適用
-        """
-        # 実装省略（実際の実装はここに依存）
-        return h
 
 
 def create_biokan_classifier(
@@ -2825,89 +2603,103 @@ class HigherCognitionModule(nn.Module):
     
 class NeuromodulationSystem(nn.Module):
     def __init__(self, hidden_dim, device="cuda"):
-        """神経調節システムの初期化
-
-        Args:
-            hidden_dim (int): 隠れ層の次元数
-            device (str, optional): 使用するデバイス。デフォルトは"cuda"。
-        """
         super().__init__()
-        self.hidden_dim = hidden_dim
+        
         self.device = device
+        self.hidden_dim = hidden_dim
         
-        # 神経伝達物質の状態
-        self.dopamine = nn.Parameter(torch.zeros(1, hidden_dim, device=device))
-        self.serotonin = nn.Parameter(torch.zeros(1, hidden_dim, device=device))
-        self.noradrenaline = nn.Parameter(torch.zeros(1, hidden_dim, device=device))
+        # 神経調節パラメータ
+        self.dopamine = nn.Parameter(torch.ones(1, device=device))
+        self.serotonin = nn.Parameter(torch.ones(1, device=device))
+        self.norepinephrine = nn.Parameter(torch.ones(1, device=device))
+        self.acetylcholine = nn.Parameter(torch.ones(1, device=device))
         
-        # 状態更新のためのネットワーク
-        self.update_network = nn.Sequential(
-            nn.Linear(hidden_dim * 4, hidden_dim * 3),
+        # 神経調節の変換層
+        self.modulation_transform = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 4),
             nn.ReLU(),
-            nn.Linear(hidden_dim * 3, hidden_dim * 3),
-            nn.Sigmoid()
-        )
+            nn.Linear(hidden_dim // 4, hidden_dim)
+        ).to(device)
         
+        # 初期状態
+        self.baseline_levels = {
+            'dopamine': 1.0,
+            'serotonin': 1.0,
+            'norepinephrine': 1.0,
+            'acetylcholine': 1.0
+        }
+        
+        # デバイスに移動
+        self.to(device)
+
     def forward(self, x):
-        """順伝播
+        # 入力の形状を取得
+        batch_size = x.size(0)
+        
+        # 神経調節の計算
+        modulation = self.modulation_transform(x)
+        
+        # 各神経伝達物質の効果を適用
+        dopamine_effect = self.dopamine * modulation
+        serotonin_effect = self.serotonin * modulation
+        norepinephrine_effect = self.norepinephrine * modulation
+        acetylcholine_effect = self.acetylcholine * modulation
+        
+        # 全ての効果を組み合わせ
+        combined_effect = (
+            dopamine_effect +
+            serotonin_effect +
+            norepinephrine_effect +
+            acetylcholine_effect
+        ) / 4.0
+        
+        return combined_effect
 
-        Args:
-            x (torch.Tensor): 入力テンソル [batch_size x hidden_dim]
-
-        Returns:
-            torch.Tensor: 調節された出力 [batch_size x hidden_dim]
-        """
-        batch_size = x.shape[0]
-        
-        # 現在の神経伝達物質の状態を取得
-        current_state = torch.cat([
-            self.dopamine.expand(batch_size, -1),
-            self.serotonin.expand(batch_size, -1),
-            self.noradrenaline.expand(batch_size, -1)
-        ], dim=1)
-        
-        # 入力と現在の状態を結合
-        combined = torch.cat([x, current_state], dim=1)
-        
-        # 新しい状態を計算
-        new_state = self.update_network(combined)
-        
-        # 各神経伝達物質の効果を分離
-        dopamine_effect = new_state[:, :self.hidden_dim]
-        serotonin_effect = new_state[:, self.hidden_dim:2*self.hidden_dim]
-        noradrenaline_effect = new_state[:, 2*self.hidden_dim:]
-        
-        # 入力に対する調節効果を計算
-        modulated = x * (1 + dopamine_effect) * (1 + serotonin_effect) * (1 + noradrenaline_effect)
-        
-        return modulated
-    
     def update(self, stimuli):
-        """神経伝達物質の状態を更新
-
+        """
+        外部刺激に基づいて神経伝達物質レベルを更新
+        
         Args:
-            stimuli (dict): 各神経伝達物質の刺激値を含む辞書
+            stimuli (dict): 各神経伝達物質への刺激レベル
         """
-        # 各神経伝達物質の状態を更新
         if 'dopamine' in stimuli:
-            self.dopamine.data = torch.clamp(self.dopamine + stimuli['dopamine'], 0, 1)
+            self.dopamine.data = torch.tensor([stimuli['dopamine']], device=self.device)
         if 'serotonin' in stimuli:
-            self.serotonin.data = torch.clamp(self.serotonin + stimuli['serotonin'], 0, 1)
-        if 'noradrenaline' in stimuli:
-            self.noradrenaline.data = torch.clamp(self.noradrenaline + stimuli['noradrenaline'], 0, 1)
-    
-    def get_state(self):
-        """現在の神経伝達物質の状態を取得
+            self.serotonin.data = torch.tensor([stimuli['serotonin']], device=self.device)
+        if 'norepinephrine' in stimuli:
+            self.norepinephrine.data = torch.tensor([stimuli['norepinephrine']], device=self.device)
+        if 'acetylcholine' in stimuli:
+            self.acetylcholine.data = torch.tensor([stimuli['acetylcholine']], device=self.device)
 
-        Returns:
-            dict: 各神経伝達物質の現在の状態を含む辞書
-        """
+    def get_state(self):
+        """現在の神経伝達物質レベルを取得"""
         return {
-            'dopamine': self.dopamine,
-            'serotonin': self.serotonin,
-            'noradrenaline': self.noradrenaline
+            'dopamine': self.dopamine.item(),
+            'serotonin': self.serotonin.item(),
+            'norepinephrine': self.norepinephrine.item(),
+            'acetylcholine': self.acetylcholine.item()
         }
 
 def monitor_memory():
     print(f'GPU使用メモリ: {torch.cuda.memory_allocated()/1e9:.2f} GB')
     print(f'GPU最大メモリ: {torch.cuda.max_memory_allocated()/1e9:.2f} GB')
+
+class AdvancedMNISTExperiment:
+    def __init__(self, config):
+        self.model = NeuropharmacologicalBioKAN(
+            hidden_dim=512,
+            num_blocks=6,
+            attention_type="biological"
+        )
+        
+        # 学習率スケジューラの追加
+        self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            self.optimizer,
+            max_lr=2e-4,
+            epochs=config.num_epochs,
+            steps_per_epoch=len(self.train_loader)
+        )
+        
+        # 並列処理の最適化
+        if torch.cuda.device_count() > 1:
+            self.model = nn.DataParallel(self.model)
